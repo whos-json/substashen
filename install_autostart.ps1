@@ -25,7 +25,7 @@ Write-Host "  Runs:  `"$exe`""
 Write-Host "  Manage it in Settings > Apps > Startup, or Task Manager > Startup apps."
 
 # Start it now unless it's already running (a second copy would only show an "already running" message).
-if (Get-CimInstance Win32_Process -Filter "Name like 'pythonw%'" | Where-Object CommandLine -like '*substashen.pyw*') {
+if (Get-CimInstance Win32_Process -Filter "Name like 'pythonw%'" | Where-Object { $_.CommandLine -like '*substashen.pyw*' -and $_.CommandLine -notlike '*--demo*' }) {
     Write-Host "Substashen is already running."
 } else {
     Start-Process -FilePath $exe -WorkingDirectory $dir

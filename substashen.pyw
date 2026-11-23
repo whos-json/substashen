@@ -5,7 +5,7 @@ Protection
   * any 12V-2x6 pin over 8 A (twice in a row, or once over 10 A), or the PSU's own Safeguard+ alarm:
     closes every program on the NVIDIA GPUs (again every 3 s while the fault lasts), sounds a warning
     and covers every monitor with a flashing alert until acknowledged
-  * PSU +12V output outside 11.6-12.6 V for 3 s: warning and cover, nothing closed
+  * PSU +12V output outside 11.6-12.6 V for 3 fresh samples: warning and cover, nothing closed
   * no fresh pin data for 30 s (Afterburner closed or hung, PSU plugin off or frozen): warning and cover once
 
 Run:  pythonw substashen.pyw
@@ -19,9 +19,10 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 APP = "Substashen"
-PIN_MAX_A, PIN_WARN_A, PIN_HARD_A, PIN_SANE_A = 8.0, 6.0, 10.0, 30.0  # limit / amber / alert on one sample / garbage
+PIN_MAX_A, PIN_WARN_A, PIN_HARD_A, PIN_SANE_A = 8.0, 6.0, 10.0, 30.0  # limit / amber / alert on one sample / implausible
+PIN_GARBAGE_A = 1000.0  # at or above this a pin reading is a broken sensor value; 30-1000 A still counts as a fault
 V_MIN, V_MAX = 11.6, 12.6  # checked on the PSU's +12V output (Afterburner has no GPU-side 12 V input reading)
-GPU_TDP_W = 360            # RTX 5080 default power limit; fixed scale for the power trace
+GPU_TDP_W = 360            # RTX 5080 default power limit (colour thresholds, tooltip)
 STALE_S, FROZEN_S, OFFLINE_ALERT_S, STARTUP_GRACE_S = 5, 8, 30, 120  # frozen: real pins jitter every second under load
 SNOOZE_S, KILL_EVERY_S, TRACE_EVERY_S = 60, 3, 3
 PIN_RE = re.compile(r"\bpin", re.I)
@@ -223,13 +224,13 @@ class _TS(ctypes.Structure):  # NV_GPU_THERMAL_SENSORS v2 (undocumented NVAPI qu
                 ("t", ctypes.c_int32 * 32)]
 
 
-_nvapi = None
+_nvapi, _nvapi_empty = None, 0
 
 
 def mem_temps():
     """{PCI bus: GDDR7 temperature} per NVIDIA card from NVAPI's thermal sensors. A read-only query; nothing here
     can change a setting. shortcut: sensor 2 is memory on RTX 50 (NVIDIA dropped hotspot there); older cards differ."""
-    global _nvapi
+    global _nvapi, _nvapi_empty
     if DEMO:
         return {1: 52.0, 3: 55.0}
     try:
@@ -263,6 +264,11 @@ def mem_temps():
             s = _TS(version=ctypes.sizeof(_TS) | 2 << 16, mask=0b111)
             if get(h, ctypes.byref(s)) == 0 and 0 < s.t[2] / 256 < 150:  # 255 = no sensor
                 out[bus] = s.t[2] / 256
+        # every read failing for ~60 s (12 polls) means the handles went stale in a driver reset: enumerate again
+        _nvapi_empty = 0 if out or not by_bus else _nvapi_empty + 1
+        if _nvapi_empty >= 12:
+            log("NVAPI handles stale; re-enumerating")
+            _nvapi, _nvapi_empty = None, 0
         return out
     except Exception:
         log("memory temperature unavailable:\n" + traceback.format_exc())
@@ -309,8 +315,9 @@ def check(readings):
         if sensor == "MSI PSU" and label == "+12V" and not (V_MIN <= val <= V_MAX):
             faults.append({"kind": "volt", "title": "12 V rail out of range", "where": "PSU +12V output",
                            "val": val, "unit": "V", "limit": f"{V_MIN}-{V_MAX} V"})
-        if unit == "A" and PIN_RE.search(label) and PIN_MAX_A < val < PIN_SANE_A:
-            faults.append({"kind": "pin", "title": "12V-2x6 overcurrent", "where": pin_name(label), "hard": val > PIN_HARD_A,
+        if unit == "A" and PIN_RE.search(label) and PIN_MAX_A < val < PIN_GARBAGE_A:  # >= 30 A needs two samples
+            faults.append({"kind": "pin", "title": "12V-2x6 overcurrent", "where": pin_name(label),
+                           "hard": PIN_HARD_A < val < PIN_SANE_A,
                            "val": val, "unit": "A", "limit": f"{PIN_MAX_A:.1f} A per pin"})
         alarm = re.fullmatch(r"12V-2x6_(\d) Alarm", label)
         if alarm and val:
@@ -325,7 +332,7 @@ def coverage(readings, age):
     """None when the pin protection has what it needs, else a short reason."""
     if age > STALE_S:
         return f"Afterburner stopped updating {age:.0f} s ago"
-    pins = sum(1 for s, l, v, u in readings if s == "MSI PSU" and u == "A" and PIN_RE.search(l) and 0 <= v < PIN_SANE_A)
+    pins = sum(1 for s, l, v, u in readings if s == "MSI PSU" and u == "A" and PIN_RE.search(l) and 0 <= v < PIN_GARBAGE_A)
     if pins < 12:
         return f"only {pins} of 12 pin readings" if pins else "no PSU pin readings"
     if not any(s == "MSI PSU" and l == "+12V" for s, l, v, u in readings):
@@ -346,6 +353,16 @@ IMB_SPREAD_A, IMB_MIN_TOTAL_A, IMB_HOLD_S = 4.0, 15.0, 5  # one cable's pins far
 CAP_MARGIN_W, CAP_HOLD_S = 20, 30                          # card above its power cap (settings "power_cap_w")
 HEAT_RMS_A, HEAT_TAU_S = 7.0, 120                          # a pin carrying a lot for minutes, not just a spike
 INCIDENT_FILE = os.path.join(HERE, "incidents.log")
+DAY_FILE = os.path.join(HERE, "day.json")  # today's peaks and counts, kept across a relaunch
+
+
+def parse_cap(v):
+    """settings "power_cap_w" is hand-edited: text, NaN, Infinity, 0 or a negative value falls back to 270 W."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 270.0
+    return v if math.isfinite(v) and v > 0 else 270.0
 
 
 def advisory_checks(pins, gpu_power, cap_w, mem, now, dt):
@@ -364,8 +381,12 @@ def advisory_checks(pins, gpu_power, cap_w, mem, now, dt):
         for pin, a in vals:  # exponential average of I^2: heat in a contact goes with current squared
             k = f"heat{n}_{pin}"
             mem[k] = mem.get(k, 0.0) + (a * a - mem.get(k, 0.0)) * min(1.0, dt / HEAT_TAU_S)  # builds up from 0
-            if mem[k] ** 0.5 >= HEAT_RMS_A:
-                active[k] = f"Cable {n} pin {pin} hot: {mem[k] ** 0.5:.1f} A sustained"
+            rms, on = mem[k] ** 0.5, f"on{k}"
+            if rms >= HEAT_RMS_A or (mem.get(on) and rms >= HEAT_RMS_A - 0.5):  # 0.5 A exit band: no flapping
+                mem[on] = True
+                active[k] = f"Cable {n} pin {pin} hot: {rms:.1f} A sustained"
+            else:
+                mem.pop(on, None)
     for g, w in gpu_power.items():
         k = f"cap{g}"
         if w is not None and w > cap_w + CAP_MARGIN_W:
@@ -409,7 +430,11 @@ def run_bounded(args, timeout):
         out, _ = p.communicate(timeout=timeout)
         return p.returncode, out
     except subprocess.TimeoutExpired:
-        p.kill()  # don't wait for it
+        p.kill()
+        try:  # reap it and close the pipe; a driver-hung child may never die, so only briefly
+            p.communicate(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
         raise
 
 
@@ -450,14 +475,15 @@ def kill_gpu_tasks():
         if path.lower().startswith(SAFE_DIRS) or name.lower() in SAFE_EXE:
             continue
         try:
-            ok = subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5,
-                                creationflags=NOWIN).returncode == 0
+            rc = subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=5,
+                                creationflags=NOWIN).returncode
+            ok = rc in (0, 128)  # 128: the process had already exited; access denied is 1 and still counts as failed
         except Exception:
             ok = False
         (closed if ok else failed).add(name)
     if closed or failed:
         log(f"closed {sorted(closed)}; could not close {sorted(failed)}")
-    return sorted(closed), sorted(failed - closed)
+    return sorted(closed - failed), sorted(failed)  # a name with any failed PID is still running
 
 
 # ---------- warning tones ----------
@@ -511,7 +537,7 @@ def alarm_stop():
 # ---------- small JSON stores ----------
 def load_json(path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8-sig") as f:  # tolerates a Notepad BOM
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
@@ -521,7 +547,7 @@ def load_json(path):
 def save_json(path, data):
     try:
         tmp = path + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f)
         os.replace(tmp, path)  # never leave a half-written file behind
     except OSError as e:  # OneDrive / antivirus holding the file must never stop monitoring
@@ -684,6 +710,7 @@ def read_msi_record():
 BG, PANEL, LINE, GRID = "#0b0c0e", "#0b0c0e", "#23272c", "#16191d"
 TXT, TXT2, SUB, DIM = "#eceef0", "#cdd2d7", "#aab2b9", "#7a838c"
 OK, WARN, BAD = "#4fd18b", "#ffb020", "#ff453a"
+LIMIT_MARK = "#8a929a"  # static limit ticks: neutral at rest, so red only ever means over a limit now
 GOLD = "#6e6446"  # card edge fingers: muted so nothing normal looks like caution amber
 FONT = {"mono": "Consolas", "mono_m": "Consolas", "mono_b": "Consolas", "cond": "Segoe UI", "cond_b": "Segoe UI"}
 SCALE = 1.0  # Windows display scaling (1.25 at 125 %). Layout is written at 100 %, then canvas.scale()d.
@@ -810,22 +837,6 @@ def draw_pins(c, x0, x1, bt, bb, pins, size=10, volts=None, alarms=None):
     c.create_text(x1, ly - size * 0.9, text=f"LIMIT {PIN_MAX_A:.1f} A", fill=BAD, font=F(size - 1), anchor="e")
 
 
-def draw_power_trace(c, x0, x1, y0, y1, hist):
-    """Fixed 0-360 W axis (the card's power limit), 90 s window, value printed at the live end."""
-    wy = lambda w: y1 - min(max(w, 0), GPU_TDP_W) / GPU_TDP_W * (y1 - y0)
-    px1 = x1 - 26  # room for axis labels on the right
-    for w in (0, GPU_TDP_W / 2, GPU_TDP_W):
-        c.create_line(x0, wy(w), px1, wy(w), fill=GRID)
-        c.create_text(x1, wy(w), text=f"{w:.0f}", fill=DIM, font=F(9), anchor="e")
-    if len(hist) < 2:
-        return
-    step = (px1 - x0) / (hist.maxlen - 1)
-    pts = [p for k, w in enumerate(hist) for p in (px1 - (len(hist) - 1 - k) * step, wy(w))]
-    c.create_polygon([pts[0], y1] + pts + [pts[-2], y1], fill="#14181c", outline="")
-    c.create_line(pts, fill=TXT2, width=1.2 * SCALE)
-    c.create_rectangle(pts[-2] - 2, pts[-1] - 2, pts[-2] + 2, pts[-1] + 2, fill=TXT, outline="")
-
-
 # ---------- the two cards, as line drawings ----------
 def fan_path(cx, cy, rh, r, a, style, blades):
     """Every blade's curved leading edge as ONE polyline (out to the rim and back; the joins sit under the hub),
@@ -912,7 +923,8 @@ LOW_Y, LOW_H = DIAG_Y + DIAG_H, 196        # rails / trends / energy
 H = LOW_Y + LOW_H
 FEEDER_Y = {"1": DIAG_Y + 116, "2": DIAG_Y + 272}
 MEM_WARN_C, MEM_MAX_C = 90, 100  # GDDR7: amber from 90 degC, red from 100 (it throttles around 105)
-GPU_COLS = (0, 104, 200)  # x offsets of the three GPU readout columns; fits "1,622 rpm" and "MEMORY max 55"
+PSU_KEYS = ("PSU Power Out", "PSU Efficiency", "PSU Temperature", "PSU Fan")
+GPU_COLS = (0, 98, 178)  # x offsets of the three GPU readout columns; fits "1,622 rpm" and "POWER ↑280"
 AB_EXE = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "MSI Afterburner", "MSIAfterburner.exe")
 # SCADA one-line conventions: yellow busbars, cyan equipment IDs, magenta names, muted-red measurement labels,
 # green values. A real alarm is bright red (BAD), so it never blends with the labels.
@@ -923,6 +935,9 @@ LINK_HELP = ("MSI Afterburner: LIVE while its data is fresh; shows the age when 
              "Uptime counters read from the PSU over USB once a minute (read-only).")
 # Calm when healthy (ISA-101): grey labels, light values; yellow bus/cyan IDs give structure; colour = attention.
 S_BUS, S_ID, S_NAME, S_LBL, S_VAL, S_EQ = "#8e9aa6", "#5cc8ee", "#9aa3ab", "#8d969e", "#e2e6ea", "#3a7a90"
+# current flow: short pulses inside the feed lines, a shade lighter than the wire, so they read as motion in
+# the conductor rather than objects on it; peripheral, never competing with the numbers or the alarm colours
+FLOW, FLOW_GAP, FLOW_MIN_A = "#b9c2cb", 26, 3.0  # dots move only while a cable carries real load
 BAR_OK = "#6f7a84"  # a pin bar that is fine: neutral, so amber/red ones stand out
 
 
@@ -952,14 +967,19 @@ class App:
         r.bind("<Map>", self.on_map)
         r.after(50, self.taskbar_button)
         pos = self.settings.get("pos")
+        pos = pos if isinstance(pos, list) and len(pos) == 2 and all(type(v) is int for v in pos) else None
         on_screen = pos and any(x <= pos[0] < x + w - 50 and y <= pos[1] < y + h - 50 for x, y, w, h, _ in monitors())
         r.geometry(f"+{pos[0]}+{pos[1]}" if on_screen else
                    f"+{mx + max(0, round((mw - W * SCALE) / 2))}+{my + round(16 * SCALE)}")  # top of home monitor
         # two sizes: full (everything) and standard (no trend/energy row); an old saved "compact" becomes standard
         self.view = self.settings.get("view") or "standard"
         self.view = self.view if self.view in VIEWS else "standard"
-        self.night, self.night_force = False, None  # night dimming: automatic by hour, N key forces on/off
-        self.idle_alpha = float(self.settings.get("idle_opacity", 1.0))  # 1.0 = off; O key toggles 0.8
+        self.night, self.night_force = False, None  # night dimming: N key toggles by hand
+        try:  # hand-edited settings must never stop protection starting
+            self.idle_alpha = min(1.0, max(0.3, float(self.settings.get("idle_opacity", 1.0))))  # 1.0 = off; O: 0.8
+        except (TypeError, ValueError):
+            self.idle_alpha = 1.0
+        self.power_cap = parse_cap(self.settings.get("power_cap_w", 270))
         self.c = c = tk.Canvas(r, width=W * SCALE, height=self.ph() * SCALE, bg=BG, highlightthickness=0)
         c.pack()
         c.bind("<ButtonPress-1>", self.press)
@@ -974,7 +994,7 @@ class App:
         self.resizing, self.zoom_job, self.started = False, None, time.time()
         self.warnings, self.adv_mem, self.last_collect, self.last_tick = {}, {}, None, time.time()
         self.recent = collections.deque(maxlen=8)  # recent incidents, shown in the DATA view
-        self.day_stats = self.new_day()
+        self.day_stats = self.load_day()
         self.table = tk.Text(r, bg=BG, fg=TXT2, font=(FONT["mono"], -round(11 * SCALE)), bd=0, width=120, height=34,
                              highlightthickness=1, highlightbackground=LINE, padx=14, pady=10)
         self.table.tag_config("h", foreground=SUB)
@@ -989,11 +1009,18 @@ class App:
         self.streak, self.arrivals = collections.Counter(), collections.deque(maxlen=11)
         self.unprotected_since, self.offline_alerted, self.reason = None, False, None
         self.frozen = (None, time.time())
-        self.last_kill, self.kill_thread, self.closed, self.failed = 0, None, set(), set()
-        self.confirm_until, self.error, self.last_frame = 0, None, None
+        self.last_kill, self.kill_thread, self.closed, self.failed, self.kill_gen = 0, None, set(), set(), 0
+        self.confirm_until, self.error, self.last_frame, self.last_ok = 0, None, None, time.time()
         self.fan_specs, self.fan_speed, self.fan_vis, self.fan_angle = [], {}, {}, collections.defaultdict(float)
+        self.flow_specs, self.flow_amps, self.flow_phase, self.flow_shown = [], {}, {}, set()
         self.anim_t, self.flash_items, self.flash_on = time.time(), [], True
-        self.cable_map, self.map_score = dict(self.settings.get("cable_map") or {"1": "0", "2": "1"}), 0.0
+        try:
+            self.cable_map = dict(self.settings.get("cable_map") or {})
+            if set(self.cable_map) != {"1", "2"} or set(self.cable_map.values()) != {"0", "1"}:
+                raise ValueError
+        except (TypeError, ValueError):
+            self.cable_map = {"1": "0", "2": "1"}
+        self.map_score = 0.0
         self.items, self.cache, self.sig = {}, {}, None
         self.help_text, self.link_now, self.link_idle = None, (None, None), ""
         r.protocol("WM_DELETE_WINDOW", self.ask_quit)
@@ -1121,6 +1148,8 @@ class App:
         self.quit("relaunch")
 
     def quit(self, why="closed by the user"):
+        if not DEMO:
+            self.save_day()
         self.write_day("DAY-SO-FAR")
         self.event("STOP", why)
         if not DEMO:
@@ -1156,7 +1185,8 @@ class App:
                 self.unprotected_since = self.unprotected_since or now
                 if not self.offline_alerted and now - self.unprotected_since >= OFFLINE_ALERT_S:
                     self.offline_alerted = self.raise_alert([self.offline_fault(f"internal error: {self.error}")], now)
-                self.render(self.last_frame)
+                r, f, a = self.last_frame or (None, [], 0)
+                self.render((r, f, a + now - self.last_ok))  # the real age, so the old values show as stale
             except Exception:
                 pass
         finally:
@@ -1175,6 +1205,30 @@ class App:
     def new_day():
         return {"date": datetime.date.today(), "peak": {}, "pin_peak": {}, "above_warn_s": 0.0, "max_spread": 0.0, "alarms": 0,
                 "warnings": 0}
+
+    def load_day(self):
+        """Today's stats from the last run; a day that ended while the app was closed still gets its DAILY line."""
+        d, today = ({} if DEMO else load_json(DAY_FILE)), datetime.date.today()
+        try:  # hand-editable file: coerce every field, or start the day fresh
+            day = self.new_day()
+            day.update(date=datetime.date.fromisoformat(d["date"]), above_warn_s=float(d["above_warn_s"]),
+                       max_spread=float(d["max_spread"]), alarms=int(d["alarms"]), warnings=int(d["warnings"]),
+                       peak={str(n): float(a) for n, a in d["peak"].items()},
+                       pin_peak={(n, int(p)): float(a) for k, a in d["pin_peak"].items() for n, p in [k.split(",")]},
+                       psu={k: [float(a[0]), int(a[1]), float(a[2]), float(a[3])] for k, a in d.get("psu", {}).items()},
+                       gpu_tmax={str(k): float(v) for k, v in d.get("gpu_tmax", {}).items()})
+        except (KeyError, ValueError, TypeError, AttributeError, IndexError):
+            return self.new_day()
+        if day["date"] < today:
+            self.day_stats = day
+            self.write_day()
+            save_json(DAY_FILE, {})  # written once: a crash before the next quit must not repeat it
+        return day if day["date"] == today else self.new_day()
+
+    def save_day(self):
+        d = self.day_stats
+        save_json(DAY_FILE, {**d, "date": d["date"].isoformat(),
+                             "pin_peak": {f"{n},{p}": a for (n, p), a in d["pin_peak"].items()}})
 
     def write_day(self, label="DAILY"):
         d = self.day_stats
@@ -1204,11 +1258,11 @@ class App:
             self.protect(now)
         if faults and self.raise_alert(faults, now) and any(f["kind"] == "offline" for f in faults):
             self.offline_alerted = True
-        if readings is not None:
-            self.collect(readings)
+        if readings is not None:  # stale or frozen values must not feed the warn rules or the day's peaks
+            self.collect(readings, fresh=age <= STALE_S and not (reason or "").startswith("PSU readings frozen"))
             if now - self.oc_at >= 5:
                 self.oc, self.oc_at, self.memt = read_oc(), now, mem_temps()
-        self.last_frame = (readings, faults, age)
+        self.last_frame, self.last_ok = (readings, faults, age), now
         if self.visible():  # hidden behind an alert or minimized: skip the drawing work
             self.render(self.last_frame)
             if int(now) % 5 == 0:
@@ -1251,22 +1305,25 @@ class App:
     def protect(self, now):
         """Close GPU programs now and every few seconds while the pin fault lasts, even with the alert snoozed."""
         busy = self.kill_thread and self.kill_thread.is_alive()
-        if busy and now - self.last_kill > 30:  # stuck in a hung child process: report it and start a fresh attempt
+        # worst healthy run: 16 s of nvidia-smi plus 5 s per taskkill; past 60 s a child process is hung
+        if busy and now - self.last_kill > 60:  # stuck: report it and start a fresh attempt
             self.failed.add("(closing is stuck: nvidia-smi or taskkill not responding)")
             busy = False
         if now - self.last_kill < KILL_EVERY_S or busy:
             return
         self.last_kill = now
+        self.kill_gen = gen = self.kill_gen + 1
 
         def run():
             closed, failed = kill_gpu_tasks()
-            self.closed.update(closed)
-            self.failed = (self.failed | set(failed)) - self.closed
+            if gen == self.kill_gen:  # a stuck older run that finishes late must not overwrite a newer result
+                self.closed.update(closed)
+                self.failed = set(failed)  # the latest run is the truth; also clears a stale "stuck" note
 
         self.kill_thread = threading.Thread(target=run, daemon=True)
         self.kill_thread.start()
 
-    def collect(self, readings):
+    def collect(self, readings, fresh=True):
         pins, psu, gpus = collections.defaultdict(list), {}, {}
         for sensor, label, val, unit in readings:
             if sensor == "MSI PSU":
@@ -1283,35 +1340,51 @@ class App:
         for vals in pins.values():
             vals.sort()
         self.pins, self.psu, self.gpus = dict(pins), psu, gpus
+        st = self.day_stats.setdefault("psu", {})  # today's sum, count, min, max per PSU reading
+        for key in PSU_KEYS:
+            v = psu.get(key)
+            if v is not None:
+                a = st.setdefault(key, [0.0, 0, v, v])
+                a[0], a[1], a[2], a[3] = a[0] + v, a[1] + 1, min(a[2], v), max(a[3], v)
         now = time.time()
         dt = min(now - self.last_collect, 5) if self.last_collect else 1.0
         self.last_collect = now
-        every = [a for v in self.pins.values() for _, a in v]
-        if every:
-            self.hist["worst"].append(max(every))
-        cap = float(self.settings.get("power_cap_w", 270))
-        active = advisory_checks(self.pins, {g: d["v"].get("GPU Power") for g, d in gpus.items()}, cap,
-                                 self.adv_mem, now, dt)
-        for k in active.keys() - self.warnings.keys():
-            self.event("WARNING", active[k], self.snapshot())
-            self.day_stats["warnings"] += 1
-        for k in self.warnings.keys() - active.keys():
-            self.event("CLEARED", self.warnings[k])
-        self.warnings = active
-        d = self.day_stats  # daily summary: written when the date changes
-        if d["date"] != datetime.date.today():
+        if self.day_stats["date"] != datetime.date.today():  # daily summary: written when the date changes
             self.write_day()
-            self.day_stats = d = self.new_day()
+            self.day_stats = self.new_day()
+            if not DEMO:
+                self.save_day()  # drop yesterday from day.json so a crash cannot write its DAILY line again
+        if fresh:
+            every = [a for v in self.pins.values() for _, a in v]
+            if every:
+                self.hist["worst"].append(max(every))
+            self.day_pins(dt)
+            active = advisory_checks(self.pins, {g: d["v"].get("GPU Power") for g, d in gpus.items()}, self.power_cap,
+                                     self.adv_mem, now, dt)
+            for k in active.keys() - self.warnings.keys():
+                self.event("WARNING", active[k], self.snapshot())
+                self.day_stats["warnings"] += 1
+            for k in self.warnings.keys() - active.keys():
+                self.event("CLEARED", self.warnings[k])
+            self.warnings = active
+        self.infer_cable_map()
+        self.poll_psu_usb()
+
+    def day_pins(self, dt):
+        """Today's pin peaks, widest spread and time at or over 6 A; garbage readings are the 8 A rule's business."""
+        d, every = self.day_stats, []
         for n, v in self.pins.items():
+            v = [(pin, a) for pin, a in v if 0 <= a < PIN_SANE_A]
+            if not v:
+                continue
             amps = [a for _, a in v]
+            every += amps
             d["peak"][n] = max(d["peak"].get(n, 0.0), max(amps))
             for pin, a in v:
                 d["pin_peak"][n, pin] = max(d["pin_peak"].get((n, pin), 0.0), a)
             d["max_spread"] = max(d["max_spread"], max(amps) - min(amps))
         if every and max(every) >= PIN_WARN_A:
             d["above_warn_s"] += dt
-        self.infer_cable_map()
-        self.poll_psu_usb()
 
     def infer_cable_map(self):
         """Afterburner doesn't say which cable feeds which card: match cable watts to card watts while under load."""
@@ -1349,8 +1422,7 @@ class App:
             except Exception as e:
                 log(f"PSU USB read failed: {e}")
                 rt = None
-            if rt:
-                self.runtime = (*rt, time.time())
+            self.runtime = (*rt, time.time()) if rt else None  # never keep counting on a failed read
             self.usb_ok = rt is not None
             self.record = read_msi_record() or self.record
 
@@ -1414,7 +1486,7 @@ class App:
                     [("AFTERBURNER", BAD, "DOWN"), ("GPUS", DIM, "-"), ("PIN SENSORS", DIM, "-"), ("12V READING", DIM, "-"),
                      ("PSU USB", DIM, "-")])
         ngpu = len({GPU_RE.search(s).group(1) for s, *_ in readings if GPU_RE.search(s)})
-        npin = sum(1 for s, l, v, u in readings if s == "MSI PSU" and u == "A" and PIN_RE.search(l))
+        npin = sum(1 for s, l, v, u in readings if s == "MSI PSU" and u == "A" and PIN_RE.search(l) and 0 <= v < PIN_GARBAGE_A)
         has12 = any(s == "MSI PSU" and l == "+12V" for s, l, v, u in readings)
         stale = age > STALE_S
         # "LIVE" stays put while data is fresh, so this text doesn't force a repaint every second
@@ -1432,7 +1504,8 @@ class App:
         if not has12:
             return "No 12 V reading: enable the PSU 12V graph", "OPEN AFTERBURNER", segs
         if self.reason:
-            return f"{self.reason}: check PSU USB cable", "OPEN AFTERBURNER", segs
+            return (f"{self.reason}: restart Afterburner" if self.reason.startswith("PSU readings frozen")
+                    else self.reason), "OPEN AFTERBURNER", segs
         if ngpu < 2:
             return "GPU readings missing: enable GPU graphs in Afterburner", "OPEN AFTERBURNER", segs
         return None, None, segs
@@ -1450,19 +1523,15 @@ class App:
         self.update(readings, faults, age)
 
     def night_now(self):
-        hours = self.settings.get("night_hours")  # off unless set, e.g. [23, 7]; N still toggles it by hand
-        h = datetime.datetime.now().hour
-        auto = bool(hours) and ((h >= hours[0] or h < hours[1]) if hours[0] > hours[1] else hours[0] <= h < hours[1])
-        self.night = auto if self.night_force is None else self.night_force
+        self.night = bool(self.night_force)  # by hand only (N key), never by the clock
         return self.night
 
     def build(self, live):
         c = self.c
         c.delete("all")
-        self.items, self.cache, self.fan_specs = {}, {}, []
+        self.items, self.cache, self.fan_specs, self.flow_specs, self.flow_shown = {}, {}, [], [], set()  # new dots start hidden
         c.create_rectangle(0, 0, W - 1, self.ph() - 1, fill=PANEL, outline=LINE)
         # header
-        c.create_line(0, HEAD_H, W, HEAD_H, fill=LINE)
         self.tip(c.create_text(14, HEAD_H / 2, text=APP.upper(), fill=TXT, font=F(14, "mono_b"), anchor="w"),
                  "Keys: T test  D data  M minimize  C size (full/standard)  N night  O see-through.  Double-click header: size.")
         self.tip(c.create_text(150, HEAD_H / 2, text="HIGHEST PIN", fill=SUB, font=F(11, "cond_b"), anchor="w"),
@@ -1471,14 +1540,14 @@ class App:
                  "The highest of the 12 pin currents right now, and how close it is to the 8 A limit.")
         self.text("worst_sub", 466, HEAD_H / 2, "", SUB, 12)
         c.create_line(136, HEAD_H / 2 - 10, 136, HEAD_H / 2 + 10, fill=LINE)
-        # headroom gauge inline between the value and its caption: 0-10 A, caution zone shaded, 8 A limit ticked
+        # highest-pin gauge inline between the value and its caption: 0-10 A, caution zone shaded, 8 A limit ticked
         hx0, hx1, hy = 318, 450, HEAD_H / 2
         hx = lambda a: hx0 + (hx1 - hx0) * a / 10
         c.create_rectangle(hx0, hy - 3, hx1, hy + 3, fill=GRID, outline="")
         c.create_rectangle(hx(PIN_WARN_A), hy - 3, hx(PIN_MAX_A), hy + 3, fill=mix(WARN, BG, 0.8), outline="")
         self.put("hbar", c.create_rectangle(hx0, hy - 3, hx0, hy + 3, fill=S_VAL, outline=""))
-        c.create_line(hx(PIN_MAX_A), hy - 7, hx(PIN_MAX_A), hy + 7, fill=BAD, width=1.5 * SCALE)
-        self.tip(self.items["hbar"], "Headroom: the highest pin on a 0-10 A scale. Amber zone 6-8 A, red tick = 8 A limit.")
+        c.create_line(hx(PIN_MAX_A), hy - 7, hx(PIN_MAX_A), hy + 7, fill=LIMIT_MARK, width=1.5 * SCALE)
+        self.tip(self.items["hbar"], "Highest pin now, on a 0-10 A scale. Amber zone 6-8 A, tick = 8 A limit.")
         self.hbar_x = (hx0, hx1, hy)
         x = W - 14
         if time.time() < self.confirm_until:  # in-panel confirmation instead of a system dialog
@@ -1502,10 +1571,10 @@ class App:
         c.create_line(sq - 16, HEAD_H / 2 - 10, sq - 16, HEAD_H / 2 + 10, fill=LINE)
         self.put("status_sq", c.create_rectangle(sq, HEAD_H / 2 - 5, sq + 10, HEAD_H / 2 + 5, fill=OK, outline=""))
         self.tip(self.text("status", sq + 18, HEAD_H / 2, "", OK, 12, "mono_b", "w"),
-                 "PROTECTED: all 12 pin sensors are live. NOT PROTECTED: data missing or stale (see LINK).")
+                 "PROTECTED: all 12 pin sensors live. NOT PROTECTED: data missing or stale (see LINK). WARNING: a warn-only "
+                 "rule is active. FAULT: a pin or 12 V rule tripped. ERROR: see substashen.log.")
         # link row: is the data path healthy, and what to do if not
         ly = HEAD_H + LINK_H / 2
-        c.create_rectangle(1, HEAD_H + 1, W - 2, HEAD_H + LINK_H, fill="#0e1013", outline="")
         c.create_line(0, HEAD_H + LINK_H, W, HEAD_H + LINK_H, fill=LINE)
         self.tip(c.create_text(14, ly, text="LINK", fill=DIM, font=F(10, "cond_b"), anchor="w"),
                  "Data links: Afterburner freshness, GPUs seen, pin sensors, PSU 12 V reading, PSU USB.")
@@ -1568,28 +1637,40 @@ class App:
         for k, lab in enumerate(("OUTPUT", "EFFICIENCY", "TEMPERATURE", "FAN")):
             y = py0 + 84 + k * 60
             c.create_line(px0 + 10, y - 30, px1 - 10, y - 30, fill=GRID)
-            c.create_text(px0 + 10, y, text=lab, fill=S_LBL, font=F(11), anchor="w")
-            self.text(f"psu{k}", px1 - 10, y, "", S_VAL, 18, "mono_m", "e")
+            c.create_text(px0 + 10, y - 4, text=lab, fill=S_LBL, font=F(11), anchor="w")
+            self.text(f"psu{k}", px1 - 10, y - 4, "", S_VAL, 18, "mono_m", "e")
+            self.text(f"psus{k}", px1 - 10, y + 17, "", DIM, 11, "mono", "e")  # today: avg and max (min for efficiency)
         bus_x, bus_y0, bus_y1 = 232, DIAG_Y + 52, DIAG_Y + 312
         c.create_line(px1, DIAG_Y + 194, bus_x, DIAG_Y + 194, fill=S_BUS, width=2 * SCALE)
-        self.tip(c.create_line(bus_x, bus_y0, bus_x, bus_y1, fill=S_BUS, width=6 * SCALE),
-                 "PSU +12V output. Must stay 11.6-12.6 V; outside that for 3 s raises a warning.")
+        self.tip(c.create_line(bus_x, bus_y0, bus_x, bus_y1, fill=S_BUS, width=5 * SCALE),
+                 "PSU +12V output. Must stay 11.6-12.6 V; outside that for 3 fresh samples (about 3 s) raises a warning.")
         by = bus_y0 - 10
         c.create_text(bus_x + 12, by, text="+12V BUS", fill=S_ID, font=F(12, "mono_b"), anchor="w")
         self.text("bus_u", bus_x + 96, by, "", S_VAL, 15, "mono_m")
-        # the allowed range, beside the reading: band, limit ticks, live marker
-        rx0, rx1, ry = bus_x + 200, bus_x + 330, by - 1
+        # the allowed range, styled like the header gauge: 11.3-12.9 V track, safe band, red limits, live needle
+        rx0, rx1, ry = 420, 650, by  # ends on the cable output lines below
         sx = lambda v: rx0 + (min(max(v, 11.3), 12.9) - 11.3) / 1.6 * (rx1 - rx0)
-        c.create_text(rx1 + 12, by, text="safe 11.6–12.6 V", fill=SUB, font=F(11, "cond"), anchor="w")
         self.rail_y = ry
-        c.create_rectangle(rx0, ry, rx1, ry + 3, fill=GRID, outline="")
-        c.create_rectangle(sx(V_MIN), ry, sx(V_MAX), ry + 3, fill="#2a3036", outline="")
+        rail = c.create_rectangle(rx0, ry - 3, rx1, ry + 3, fill=GRID, outline="")
+        c.create_rectangle(sx(V_MIN), ry - 3, sx(V_MAX), ry + 3, fill="#2a3036", outline="")
         for v in (V_MIN, V_MAX):
-            c.create_line(sx(v), ry - 2, sx(v), ry + 5, fill=SUB)
-        self.put("u_mark", c.create_polygon(0, 0, 0, 0, 0, 0, fill=TXT, outline=""))
+            c.create_line(sx(v), ry - 7, sx(v), ry + 7, fill=LIMIT_MARK, width=1.5 * SCALE)
+            c.create_text(sx(v), ry + 15, text=f"{v:.1f}", fill=LIMIT_MARK, font=F(11))
+        self.put("u_mark", c.create_rectangle(0, 0, 0, 0, fill=TXT, outline=""))
+        self.tip([rail, self.items["u_mark"]], f"+12 V on a 11.3-12.9 V scale. Safe band {V_MIN}-{V_MAX} V "
+                 "between the red ticks; the white needle is now.")
+        for jy in [DIAG_Y + 194] + list(FEEDER_Y.values()):  # junction dots where the PSU feed and each cable join
+            c.create_oval(bus_x - 4.5, jy - 4.5, bus_x + 4.5, jy + 4.5, fill=S_BUS, outline="")
         self.rail_sx = sx
         for n, yf in FEEDER_Y.items():
             self.build_feeder(n, yf, bus_x)
+
+    def flow_path(self, key, y, segs):
+        """Small dots along a feed line (moved by animate) so a loaded cable visibly carries current."""
+        length = sum(b - a for a, b in segs)
+        dots = [self.c.create_rectangle(0, 0, 0, 0, fill=FLOW, outline="", state="hidden")
+                for _ in range(int(length // FLOW_GAP) + 1)]
+        self.flow_specs.append((key, y, segs, length, dots))
 
     def build_feeder(self, n, yf, bus_x):
         c = self.c
@@ -1611,7 +1692,7 @@ class App:
             # today's peak: a notch above the bar (max-hold), so a short spike stays visible after it passes
             self.put(f"pk{n}_{k}", c.create_line(348, yk - 7, 348, yk - 3, fill=TXT2, width=2 * SCALE, state="hidden"))
             lim = 348 + 138 * PIN_MAX_A / 10
-            c.create_line(lim, yk - 6, lim, yk + 6, fill=BAD, width=1.5 * SCALE)
+            c.create_line(lim, yk - 6, lim, yk + 6, fill=LIMIT_MARK, width=1.5 * SCALE)
             self.text(f"val{n}_{k}", 550, yk, "", S_VAL, 13, "mono_m", "e")
             self.tip([row, self.items[f"bar{n}_{k}"], self.items[f"val{n}_{k}"]], help_txt)
         # balance: a band from this cable's lowest to highest pin. Narrow = pins share evenly; wide = one pin
@@ -1626,12 +1707,14 @@ class App:
         self.text(f"sprv{n}", 550, sy, "", S_VAL, 12, "mono_m", "e")
         self.tip([self.items[f"spr{n}"], self.items[f"sprv{n}"]],
                  f"Cable {n} balance: band = lowest to highest pin, tick = average. Narrow is good; "
-                 f"wide means uneven sharing. Warns at {IMB_SPREAD_A:.0f} A apart under load.")
+                 f"wide means uneven sharing. Caution at {IMB_SPREAD_A:.0f} A apart with the cable at {IMB_MIN_TOTAL_A:.0f} A or more.")
         if n == "1":  # one amp scale under cable 1 serves the bars and the balance strip of both cables
             for amps in (0, 4, 8, 10):
                 c.create_text(348 + 138 * amps / 10, sy + 16, text=f"{amps} A" if amps == 10 else str(amps),
-                              fill=BAD if amps == 8 else DIM, font=F(11))
+                              fill=LIMIT_MARK if amps == 8 else DIM, font=F(11))
         c.create_line(572, yf, 650, yf, fill=S_BUS, width=2 * SCALE)
+        # cable -> card only: the busiest-looking part of the drawing stays still, and it costs ~1% CPU under load
+        self.flow_path(n, yf, [(572, 650)])
         self.text(f"fi{n}", 588, yf - 15, "", S_VAL, 13, "mono_m")  # cable total current, above the line
         self.text(f"fp{n}", 588, yf + 15, "", S_VAL, 13, "mono_m")  # and the watts it carries, below
         self.tip([self.items[f"fi{n}"], self.items[f"fp{n}"]], f"Cable {n} total: current and watts delivered to the card.")
@@ -1648,18 +1731,20 @@ class App:
         self.fan_specs += [((g, i), *spec) for i, spec in enumerate(specs)]
         gx = 858
         self.tip(c.create_text(gx, yf - 52, text=f"GPU{g}", fill=S_ID, font=F(14, "mono_b"), anchor="w"),
-                 f"GPU{g}: MEMORY = its GDDR7 memory temperature, amber from {MEM_WARN_C} °C. RTX 50 cards no longer report a "
-                 f"hotspot. Clocks and every other reading are in DATA.")
+                 f"GPU{g}: MEMORY = its GDDR7 memory temperature, amber from {MEM_WARN_C} °C. RTX 50 cards have no hotspot "
+                 f"sensor. ↑ = today's highest. Clocks and every other reading are in DATA.")
         # card model above its drawing; the cards don't report a model name, so settings.json "gpu_models" can set it
-        model = (self.settings.get("gpu_models") or {}).get(brand) or f"{brand} GeForce RTX 5080"
+        gm = self.settings.get("gpu_models")
+        model = gm.get(brand) if isinstance(gm, dict) else None  # hand-edited: anything but text is ignored
+        model = model.strip() if isinstance(model, str) and model.strip() else f"{brand} GeForce RTX 5080"
         c.create_text(752, yf - 52, text=model.upper(), fill=S_NAME, font=F(11, "mono_m"))
         for r, labs in enumerate((("TEMP", "MEMORY", "POWER"), ("FANS", "VRAM", "LOAD"))):
             y = yf - 22 + r * 46
             for col, (lab, dx) in enumerate(zip(labs, GPU_COLS)):
                 lab_i = c.create_text(gx + dx, y - 12, text=lab, fill=S_LBL, font=F(11), anchor="w")
                 self.text(f"g{g}_{r}{'abc'[col]}", gx + dx, y + 9, "", S_VAL, 16, "mono_m")
-                if r == 0 and col < 2:  # today's highest temperature, right after the TEMP / MEM TEMP label
-                    lx = gx + dx + (c.bbox(lab_i)[2] - c.bbox(lab_i)[0]) / SCALE + 7  # text is in pixels already
+                if r == 0:  # today's highest, right after the TEMP / MEMORY / POWER label ("↑" = max today)
+                    lx = gx + dx + (c.bbox(lab_i)[2] - c.bbox(lab_i)[0]) / SCALE + 5  # text is in pixels already
                     self.text(f"g{g}_max{col}", lx, y - 12, "", DIM, 11)
         # what Afterburner has applied: one quiet line under the drawing and the readouts. Placed by place_oc().
         for k, lab in enumerate(("POWER", "CORE", "MEM", "TEMP LIMIT")):
@@ -1706,7 +1791,7 @@ class App:
             c.create_line(tx0, ty1, tx1, ty1, fill=GRID)
             self.text(f"top{key}", tx1 + 44, ty0, "", SUB, 10, "mono", "e")
             if key == "worst":  # the 8 A limit, drawn whenever it falls inside the current scale
-                self.put("limworst", c.create_line(tx0, ty0, tx1, ty0, fill=BAD, dash=(4, 3), state="hidden"))
+                self.put("limworst", c.create_line(tx0, ty0, tx1, ty0, fill=LIMIT_MARK, dash=(4, 3), state="hidden"))
             self.put(f"trace{key}", c.create_line(0, 0, 0, 0, fill=TXT2, width=1.4 * SCALE, state="hidden"))
             self.put(f"tip{key}", c.create_rectangle(0, 0, 0, 0, fill=TXT, outline="", state="hidden"))
             self.trace_box[key] = (tx0, tx1, ty0, ty1, unit)
@@ -1724,7 +1809,7 @@ class App:
         c.create_line(bx0, H - 26, bx1, H - 26, fill=LINE)
         for k, d in enumerate(self.days):
             cx = bx0 + (k + 0.5) * bw
-            self.put(f"ebar{k}", c.create_rectangle(0, 0, 0, 0, fill=TXT2 if k == 6 else "#3a4047", outline=""))
+            self.put(f"ebar{k}", c.create_rectangle(0, 0, 0, 0, fill=TXT2 if k == 6 else BAR_OK, outline=""))
             self.text(f"eval{k}", cx, H - 40, "", TXT2 if k == 6 else SUB, 10, "mono", "s")
             c.create_text(cx, H - 14, text=d.strftime("%a").upper(), fill=TXT if k == 6 else SUB, font=F(10, "mono_m"))
         self.text("enote", (bx0 + bx1) / 2 - bw / 2, (y0 + 60 + H - 26) / 2, "", DIM, 11, "cond", "center")
@@ -1762,6 +1847,7 @@ class App:
         self.link_now = (issue, fix)
         self.show_issue()
         self.c.update_idletasks()  # repaint each region on its own: Tk merges all changes into one box
+        self.flow_amps.clear()  # pulses mean live current: none while data is gone, stale or frozen
         if readings is None:
             self.set("worst", text="-", fill=DIM)
             self.set("worst_sub", text="no pin data")
@@ -1769,15 +1855,16 @@ class App:
             self.move("hbar", (hx0, hy - 3, hx0, hy + 3))  # no data: empty, never a stale reading
             return
         psu, v12 = self.psu, self.psu.get("+12V")
-        self.vcol = V = S_VAL if age <= STALE_S else DIM  # stale values dim instead of looking live
+        stale = age > STALE_S
+        self.vcol = V = DIM if stale else S_VAL  # stale values dim instead of looking live, even over a limit
         every = [(a, n, p) for n, v in self.pins.items() for p, a in v]
         if every:
             a, n, p = max(every)
             col = level(a, PIN_WARN_A, PIN_MAX_A)
-            self.set("worst", text=f"{a:.2f} A", fill=V if col == TXT2 else col)
+            self.set("worst", text=f"{a:.2f} A", fill=V if (col == TXT2 or stale) else col)
             hx0, hx1, hy = self.hbar_x
             self.move("hbar", (hx0, hy - 3, hx0 + (hx1 - hx0) * min(a, 10) / 10, hy + 3))
-            self.set("hbar", fill=V if col == TXT2 else col)
+            self.set("hbar", fill=V if (col == TXT2 or stale) else col)
             self.set("worst_sub", text=f"{a / PIN_MAX_A * 100:.0f}% of limit  ·  cable {n} pin {p}")
         else:
             self.set("worst", text="-", fill=DIM)
@@ -1786,15 +1873,22 @@ class App:
             self.move("hbar", (hx0, hy - 3, hx0, hy + 3))  # no data: empty, never a stale reading
         vals = (f"{num(psu.get('PSU Power Out'))} W", f"{num(psu.get('PSU Efficiency'), 1)} %",
                 f"{num(psu.get('PSU Temperature'))} \u00b0C", f"{num(psu.get('PSU Fan'))} rpm")
+        st = self.day_stats.get("psu", {})
         for k, v in enumerate(vals):
             col = level(psu.get("PSU Temperature") or 0, 60, 75) if k == 2 else V
-            self.set(f"psu{k}", text=v, fill=V if col == TXT2 else col)
+            self.set(f"psu{k}", text=v, fill=V if (col == TXT2 or stale) else col)
+            if int(time.time()) % 10 and f"psus{k}" in self.cache:  # day stats drift slowly: redraw every 10 s
+                continue
+            a = st.get(PSU_KEYS[k])
+            nd, unit = (1, "%") if k == 1 else (0, ("W", "", "°C", "rpm")[k])
+            self.set(f"psus{k}", text="" if not a else
+                     f"avg {a[0] / a[1]:,.{nd}f} · {'min' if k == 1 else 'max'} {a[2] if k == 1 else a[3]:,.{nd}f} {unit}".rstrip())
         ok12 = v12 is None or V_MIN <= v12 <= V_MAX
         self.set("bus_u", text=f"{num(v12, 3)} V", fill=V if ok12 else BAD)
         if v12 is not None:
             mx = self.rail_sx(v12)
             ry = self.rail_y
-            self.move("u_mark", (mx - 4, ry - 5, mx + 4, ry - 5, mx, ry + 1))
+            self.move("u_mark", (mx - 1.5, ry - 8, mx + 1.5, ry + 8))
             self.set("u_mark", fill=TXT if ok12 else BAD)
         self.c.update_idletasks()
         blink = int(time.time()) % 2 == 0
@@ -1804,14 +1898,16 @@ class App:
             self.set(f"brk{n}", fill=(BAD if blink else BG) if status else BG)  # red only on a real alarm
             total = sum(a for _, a in vals)
             self.set(f"fi{n}", text=f"{total:.1f} A" if vals else "-", fill=V if vals else DIM)
+            if not (stale or (self.reason or "").startswith("PSU readings frozen")):
+                self.flow_amps[n] = total
             self.set(f"fp{n}", text=f"{total * v12:,.0f} W" if vals and v12 else "-", fill=V if vals else DIM)
             for k, (_pin, a) in enumerate(vals):
                 col = level(a, PIN_WARN_A, PIN_MAX_A)
-                live = V if col == TXT2 else col
+                live = V if (col == TXT2 or stale) else col
                 self.set(f"cond{n}_{k}", fill=S_BUS if col == TXT2 else col)
                 yk = FEEDER_Y[n] + (k - (len(vals) - 1) / 2) * 17
                 self.move(f"bar{n}_{k}", (348, yk - 4, 348 + 138 * min(a, 10) / 10, yk + 4))
-                self.set(f"bar{n}_{k}", fill=BAR_OK if col == TXT2 else col)
+                self.set(f"bar{n}_{k}", fill=BAR_OK if (col == TXT2 or stale) else col)
                 self.set(f"val{n}_{k}", text=f"{a:.2f}", fill=live)
                 pk = self.day_stats["pin_peak"].get((n, _pin))
                 if pk is not None:
@@ -1824,8 +1920,7 @@ class App:
                 lo, hi, avg, sy = min(amps), max(amps), sum(amps) / len(amps), self.spread_y[n]
                 spread = hi - lo
                 loaded = sum(amps) >= IMB_MIN_TOTAL_A
-                col = (WARN if loaded and spread >= IMB_SPREAD_A else
-                       mix(WARN, BG, 0.45) if loaded and spread >= IMB_SPREAD_A * 0.75 else "#5b636b")
+                col = WARN if loaded and spread >= IMB_SPREAD_A else "#5b636b"
                 x = lambda a: 348 + 138 * min(a, 10) / 10
                 self.move(f"spr{n}", (x(lo), sy - 4, max(x(hi), x(lo) + 2), sy + 4))
                 self.set(f"spr{n}", fill=col)
@@ -1837,6 +1932,9 @@ class App:
             if gpu:
                 self.update_gpu(g, gpu["v"])
                 self.c.update_idletasks()
+        if any(a >= FLOW_MIN_A for a in self.flow_amps.values()) and not getattr(self, "anim_job", None):
+            self.anim_t = time.time()
+            self.animate()
         if self.view != "full":  # trend and energy rows aren't drawn
             return
         # trends
@@ -1886,16 +1984,16 @@ class App:
             self.move(f"eval{k}", (bx0 + (k + 0.5) * bw, yv - 3))
             self.set(f"eval{k}", text=f"{v:.2f}" if v > 0 else "")
         recorded = sum(1 for v in kw if v > 0)
-        self.set("enote", text="" if recorded > 1 else "MSI Center has recorded\nonly today so far" if recorded
-                 else "no daily record yet")
+        self.set("enote", text="" if recorded > 1 else "MSI Center has recorded\nonly today so far" if recorded and kw[6] > 0
+                 else "MSI Center has recorded\n1 day of the last 7" if recorded else "no daily record yet")
 
     def update_gpu(self, g, v):
         rpm = (v.get("GPU Fan1") or 0, v.get("GPU Fan2", v.get("GPU Fan1")) or 0)
         for i in range(3):
             r = rpm[i == 1]
-            # deg/s on screen. Real rpm would alias into a strobe; this stays under ~1/3 blade spacing per frame
-            # (11 blades = 33 deg apart, 12 fps) while still reading faster as the fans speed up.
-            self.fan_speed[(g, i)] = 0.0 if r <= 0 else 30 + 100 * min(r, 3000) / 3000
+            # deg/s on screen. Real rpm would alias into a strobe; this stays under half the blade spacing per frame
+            # (11 blades = 33 deg apart; fans alone run at 8 fps, 12 with flow) while still reading faster as they speed up.
+            self.fan_speed[(g, i)] = 0.0 if r <= 0 else 30 + 90 * min(r, 3000) / 3000  # max 120 deg/s
         if any(self.fan_speed.values()) and not getattr(self, "anim_job", None):
             self.anim_t = time.time()
             self.animate()
@@ -1915,10 +2013,13 @@ class App:
         tmax = self.day_stats.setdefault("gpu_tmax", {})
         if temp is not None:
             tmax[g] = max(tmax.get(g, temp), temp)
-        self.set(f"g{g}_max0", text=f"max {tmax[g]:.0f}" if g in tmax else "")
+        self.set(f"g{g}_max0", text=f"↑{tmax[g]:.0f}" if g in tmax else "")
+        if power is not None:
+            tmax["p" + g] = max(tmax.get("p" + g, power), power)
+        self.set(f"g{g}_max2", text=f"↑{tmax['p' + g]:.0f}" if "p" + g in tmax else "")
         if mt is not None:
             tmax["m" + g] = max(tmax.get("m" + g, mt), mt)
-        self.set(f"g{g}_max1", text=f"max {tmax['m' + g]:.0f}" if "m" + g in tmax else "")
+        self.set(f"g{g}_max1", text=f"↑{tmax['m' + g]:.0f}" if "m" + g in tmax else "")
         oc = self.oc.get(g)
         sign = lambda x: f"{x:+d}".replace("-", "−")
         cells = (("-" if not oc else "n/a" if oc["power"] is None else f"{oc['power']}%"),
@@ -1961,7 +2062,7 @@ class App:
         """Turns the fan blades between full redraws; idles while the fans are stopped."""
         now = time.time()
         dt, self.anim_t = min(now - self.anim_t, 0.2), now
-        moving = False
+        moving = flowing = False
         if self.visible():
             try:
                 for key, cx, cy, rh, r, item, style in self.fan_specs:
@@ -1977,8 +2078,39 @@ class App:
                     self.c.coords(item, *[p * SCALE for p in fan_path(cx, cy, rh, r, a, style, GPU_LOOK[style]["blades"])])
             except tk.TclError:  # items were replaced by a redraw mid-loop
                 pass
-        # stops completely when nothing turns; update_gpu restarts it when a fan spins up
-        self.anim_job = self.root.after(83, self.animate) if moving else None
+            try:
+                for key, y, segs, length, dots in self.flow_specs:
+                    if self.flow_amps.get(key, 0.0) < FLOW_MIN_A:  # idle: still, and no redraw at all
+                        if self.flow_phase.pop(key, None) is not None:
+                            self.flow_shown.discard(key)
+                            for item in dots:
+                                self.c.itemconfig(item, state="hidden")
+                        continue
+                    moving = flowing = True
+                    # calm: 3-27 layout units/s from light to full load, well under half the gap per frame
+                    amps = self.flow_amps[key]
+                    ph = self.flow_phase[key] = (self.flow_phase.get(key, 0.0) + (3 + min(amps, 48) / 2) * dt) % FLOW_GAP
+                    for i, item in enumerate(dots):
+                        d = ph + i * FLOW_GAP
+                        for a, b in segs:
+                            if d <= b - a:
+                                x = a + d
+                                self.c.coords(item, (x - 3) * SCALE, (y - 1) * SCALE, (x + 3) * SCALE, (y + 1) * SCALE)
+                                break
+                            d -= b - a
+                        else:  # past the end: park it out of sight instead of toggling state every frame
+                            self.c.coords(item, -9, -9, -9, -9)
+                    if key not in self.flow_shown:  # first frame after idle
+                        self.flow_shown.add(key)
+                        for item in dots:
+                            self.c.itemconfig(item, state="normal")
+                    self.c.update_idletasks()  # repaint this thin strip on its own, not one box around all of them
+            except tk.TclError:
+                pass
+        # stops completely when nothing moves; update restarts it when current or a fan starts.
+        # Fans alone run at 8 fps: at most 15 deg a frame, under half the blade gap (Dell 11 blades = 16.4 deg),
+        # so they never appear to turn backwards; dt keeps the speed right.
+        self.anim_job = self.root.after(83 if flowing else 125, self.animate) if moving else None
 
     # --- alerts ---
     def test_alert(self):
@@ -2011,7 +2143,9 @@ class App:
         except Exception:
             log("cover failed:\n" + traceback.format_exc())
             self.close_covers()
-            self.popup = [self.fallback_cover(faults)]
+            self.popup = self.fallback_cover(faults)
+            if not self.popup:  # nothing could be drawn: keep the panel up rather than show nothing at all
+                self.root.deiconify()
         if getattr(self, "flash_job", None):
             self.root.after_cancel(self.flash_job)
         self.flash()
@@ -2026,18 +2160,34 @@ class App:
         self.popup = None
 
     def fallback_cover(self, faults):
-        p = tk.Toplevel(self.root, bg=BG)
-        p.attributes("-topmost", True)
-        p.protocol("WM_DELETE_WINDOW", self.ack)
-        tk.Label(p, text="\n".join(f"{f['title']}: {f['where']}  {fault_value(f)}" for f in faults), bg=BG, fg=TXT,
-                 font=("Consolas", 16), padx=40, pady=30).pack()
-        tk.Button(p, text="ACKNOWLEDGE", command=self.ack, bg=BAD, fg=BG, font=("Consolas", 14)).pack(pady=20)
-        return p
+        """Plain widgets, one borderless full-screen window per monitor: runs when the drawn cover failed."""
+        try:
+            rects = monitors()
+        except Exception:
+            rects = [None]
+        out = []
+        for rect in rects:
+            try:  # one bad monitor must not leave the others uncovered
+                p = tk.Toplevel(self.root, bg=BG)
+                p.overrideredirect(True)
+                p.attributes("-topmost", True)
+                if rect:
+                    x, y, w, h, _s = rect
+                    p.geometry(f"{w}x{h}+{x}+{y}")
+                p.protocol("WM_DELETE_WINDOW", self.ack)
+                tk.Label(p, text="\n".join(f"{f['title']}: {f['where']}  {fault_value(f)}" for f in faults), bg=BG,
+                         fg=TXT, font=("Consolas", 16), padx=40, pady=30).pack(expand=True)
+                tk.Button(p, text="ACKNOWLEDGE", command=self.ack, bg=BAD, fg=BG, font=("Consolas", 14)).pack(pady=20)
+                out.append(p)
+            except Exception:
+                log("fallback cover failed:\n" + traceback.format_exc())
+        return out
 
     def closed_text(self):
         if self.kill_thread and self.kill_thread.is_alive() and not self.closed:
-            return "closing GPU programs..."
-        text = "closed " + (", ".join(sorted(self.closed)) or "nothing (no programs on the GPUs)")
+            text = "closing GPU programs..."
+        else:
+            text = "closed " + (", ".join(sorted(self.closed)) or "nothing (no programs on the GPUs)")
         if self.failed:
             text += "   COULD NOT CLOSE " + ", ".join(sorted(self.failed)) + ": close it yourself or shut down now"
         return text
@@ -2160,10 +2310,10 @@ class App:
         self.render(self.last_frame)
 
 
-def single_instance():
+def single_instance(name="Local\\SubstashenSingleInstance"):
     """Two copies would both close programs and both sound alarms. Returns False if one is already running."""
     k = ctypes.WinDLL("kernel32", use_last_error=True)
-    k.CreateMutexW(None, False, "Local\\SubstashenSingleInstance")
+    k.CreateMutexW(None, False, name)
     return ctypes.get_last_error() != 183  # ERROR_ALREADY_EXISTS
 
 
@@ -2203,6 +2353,9 @@ def selftest():
     assert [x["kind"] for x in f] == ["pin", "volt"] and f[0]["where"] == "Cable 2, pin 4" and not f[0]["hard"]
     assert check(ok + [(psu, "+12V-2x6_1 Pin1 Current", 10.5, "A")])[0]["hard"]
     assert check(ok + [(psu, "+12V-2x6_1 Pin1 Current", 3.4e5, "A")]) == []  # garbage, not a fault
+    big = check(ok + [(psu, "+12V-2x6_1 Pin1 Current", 35.0, "A")])  # implausible but finite: a soft pin fault
+    assert len(big) == 1 and big[0]["kind"] == "pin" and not big[0]["hard"]
+    assert coverage(ok[1:] + [(psu, "+12V-2x6_1 Pin1 Current", 35.0, "A")], 0) is None
     f = check(ok + [(psu, "12V-2x6_2 Alarm", 2.0, "")])
     assert f[0]["hard"] and f[0]["limit"] == "PSU reports pins out of balance"
     # debounce: one 8.3 A sample alone does nothing, the second one alerts; volt needs three
@@ -2210,7 +2363,19 @@ def selftest():
     app.streak, app.arrivals = collections.Counter(), collections.deque(maxlen=11)
     soft = check(ok + [(psu, "+12V-2x6_1 Pin1 Current", 8.3, "A")])
     assert app.evaluate(soft) == [] and len(app.evaluate(soft)) == 1
+    app.streak = collections.Counter()
+    assert app.evaluate(big) == [] and len(app.evaluate(big)) == 1  # two 35 A samples close programs
     volt = check(ok + [(psu, "+12V", 11.0, "V")])
+    global DAY_FILE
+    keep, DAY_FILE = DAY_FILE, os.path.join(tempfile.gettempdir(), "substashen_selftest_day.json")
+    try:  # day stats survive a relaunch
+        app.day_stats = dict(App.new_day(), peak={"1": 5.5}, pin_peak={("1", 3): 5.5}, alarms=2, psu={"+12V": [24.2, 2, 12.0, 12.2]})
+        app.save_day()
+        back = app.load_day()
+        assert back["pin_peak"] == {("1", 3): 5.5} and back["alarms"] == 2 and back["date"] == datetime.date.today(), back
+    finally:
+        os.remove(DAY_FILE) if os.path.exists(DAY_FILE) else None
+        DAY_FILE = keep
     assert app.evaluate(volt) == [] and app.evaluate(volt) == [] and len(app.evaluate(volt)) == 1
     assert level(5, 6, 8) == TXT2 and level(7, 6, 8) == WARN and level(9, 6, 8) == BAD
     for cmd in (0x41, 0x43, 0xC0, 0xC2, 0xF1, 0xE0):  # fan, zero-fan, OCP, buzzer, save-to-NVRAM: never sendable
@@ -2235,6 +2400,16 @@ def selftest():
     for t in range(1, 600):
         active = advisory_checks(hot, {}, 270, mem, t, 1)
     assert "heat2_3" in active
+    for t in range(600, 1200):  # settles near 6.8 A: inside the exit band, stays on
+        active = advisory_checks({"2": [(3, 6.8)]}, {}, 270, mem, t, 1)
+    assert "heat2_3" in active
+    for t in range(1200, 2400):  # 6.4 A: below the band, clears
+        active = advisory_checks({"2": [(3, 6.4)]}, {}, 270, mem, t, 1)
+    assert "heat2_3" not in active
+    assert [parse_cap(v) for v in ("nan", 0, -5, "inf", "x", None, 300)] == [270.0] * 6 + [300.0]
+    app.day_stats, app.pins = App.new_day(), {"1": [(1, 250.0), (2, 5.0)], "2": [(1, -3.0)]}
+    app.day_pins(1)  # a broken 250 A or negative sample never becomes the day's peak
+    assert app.day_stats["peak"] == {"1": 5.0} and app.day_stats["max_spread"] == 0, app.day_stats
     for kind in TONES:  # every alarm file builds and is loud
         w = wave.open(tone_file(kind))
         peak = max(abs(s) for s in array.array("h", w.readframes(w.getnframes())))
@@ -2258,7 +2433,8 @@ if __name__ == "__main__":
                 if old:
                     k.WaitForSingleObject(old, 15000)
                     k.CloseHandle(old)
-            if DEMO or single_instance():
+            # a demo may run beside the real copy, but only one demo at a time
+            if single_instance("Local\\SubstashenDemo" if DEMO else "Local\\SubstashenSingleInstance"):
                 incident("START", f"pid {os.getpid()}")
                 App().root.mainloop()
             else:

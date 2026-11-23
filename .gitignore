@@ -9,3 +9,5 @@ substashen.log.old
 Substashen.exe
 __pycache__/
 *.pyc
+day.json
+day.json.tmp

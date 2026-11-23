@@ -32,8 +32,8 @@ every monitor with an alarm until you acknowledge it.
 |---|---|
 | Any pin **over 8 A** in 2 consecutive samples, or once **over 10 A** | Closes every program using the NVIDIA GPUs, repeats every 3 s while the fault lasts, sounds a warning and covers every monitor |
 | The PSU's own **Safeguard+** alarm on a cable | Same as above, immediately |
-| PSU **+12 V** outside **11.6–12.6 V** for 3 samples | Warning sound and full-screen alert; nothing is closed |
-| One cable's pins **≥ 4 A apart** under load for 5 s | Amber **WARNING** and an entry in the incident log (early sign of a bad connection) |
+| PSU **+12 V** outside **11.6–12.6 V** for 3 fresh samples | Warning sound and full-screen alert; nothing is closed |
+| One cable's pins **≥ 4 A apart**, with the cable at **≥ 15 A**, for 5 s | Amber **WARNING** and an entry in the incident log (early sign of a bad connection) |
 | A pin carrying **≥ 7 A for minutes** | Amber **WARNING** and an entry in the incident log |
 | A card **> 20 W over your power cap** for 30 s | Amber **WARNING** (the cap may have been reset by a driver update) |
 | Sensor data missing, stale or frozen | **NOT PROTECTED** shown with the fix; full-screen alert after 30 s |
@@ -46,13 +46,15 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
 
 ## The panel
 
-- **HIGHEST PIN**: the highest of the 12 currents, how close it is to the 8 A limit, and a headroom bar (caution zone 6–8 A, red tick at the limit) you can read from across the room.
+- **HIGHEST PIN**: the highest of the 12 currents, how close it is to the 8 A limit, and a headroom bar (caution zone 6–8 A, grey tick at the limit) you can read from across the room.
 - **Balance strip under each cable**: a band from the cable's lowest to its highest pin. Narrow means the pins share evenly; wide means one pin is doing more than its share. It turns amber at the same point the uneven-current warning fires.
-- **Power path diagram**: PSU → +12 V bus (with its safe 11.6–12.6 V range) → cable 1 and cable 2 → six pins each → the card they feed.
+- **PSU box**: output, efficiency, temperature and fan, each with today's average and maximum (minimum for efficiency).
+- **Power path diagram**: PSU → +12 V bus (a gauge with the safe 11.6–12.6 V band) → cable 1 and cable 2 → six pins each → the card they feed.
   Each pin has its live value, a bar against the 8 A limit and a notch marking today's peak, so a short
   spike stays visible after it has passed. The cable-to-card match is worked out
   automatically from watts.
-- **Line drawings of each card** with fans that turn at their real speed, plus GPU and GDDR7 memory temperature (each with today's maximum), load, power, fans and VRAM in use. (RTX 50 cards no longer report a hotspot temperature.)
+  While a cable carries real load (over 3 A), small pulses move along its line to the card, faster with more current.
+- **Line drawings of each card** with fans that turn at their real speed, plus GPU and GDDR7 memory temperature, load, power, fans and VRAM in use; ↑ marks today's highest temperature, memory temperature and power. (RTX 50 cards no longer report a hotspot temperature.)
 - **Afterburner settings under each card**: the power limit, core and memory clock offsets and temperature limit Afterburner has applied, read-only from its control memory. *n/a* means the card doesn't expose that setting.
 - **LINK row**: shows *ALL SENSORS OK*, or exactly which data source is missing and a button to fix it.
 - **Last 90 seconds**: the highest pin and each GPU's power over 90 s, auto-scaled.
@@ -121,7 +123,6 @@ Keys work after you click the panel once.
 | Key | Default | Meaning |
 |---|---|---|
 | `power_cap_w` | `270` | Your GPU power limit; the power-cap warning triggers 20 W above it |
-| `night_hours` | off | Optional automatic night dimming, e.g. `[23, 7]` |
 | `gpu_models` | — | Names shown above each card, e.g. `{"MSI": "MSI RTX 5080 VENTUS 3X OC"}` |
 | `view`, `zoom`, `pos` | — | Saved automatically |
 
@@ -129,6 +130,8 @@ Keys work after you click the panel once.
 
 - **`incidents.log`**: every alarm, warning, acknowledgement, start/stop and wake from sleep, with all 12 pin
   values at that moment, plus a daily summary (peak pins, time ≥ 6 A, widest spread).
+- **`day.json`**: today's peaks and counts, saved on exit so a relaunch keeps them; a day that ended while
+  the app was closed gets its daily summary at the next start.
 - **`substashen.log`**: internal errors only.
 
 ## How it gets the data
