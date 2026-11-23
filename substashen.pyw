@@ -80,7 +80,6 @@ GPU_MAP = {"temperature": "GPU Temperature", "usage": "GPU Core Load", "fb usage
            "memory usage": "GPU Memory Allocated", "core clock": "GPU Clock", "memory clock": "GPU Memory Clock",
            "power": "GPU Power", "power percent": "GPU Power %", "fan speed": "GPU Fan %", "fan tachometer": "GPU Fan1",
            "fan tachometer 2": "GPU Fan2", "bus usage": "GPU Bus Load"}
-LIMITS = ("power limit", "temp limit", "voltage limit", "no load limit", "sli sync limit")
 BRANDS = {"1028": "Dell", "1462": "MSI", "1043": "ASUS", "3842": "EVGA", "1458": "Gigabyte", "19da": "Zotac",
           "10de": "NVIDIA", "1569": "Palit", "196e": "PNY"}
 
@@ -183,7 +182,7 @@ def read_oc():
     """Afterburner's applied settings per NVIDIA card, {"0": {"power": %, "core": MHz, "mem": MHz, "temp": C}}.
     Read-only view of its control memory (MACMSharedMemory, SDK v2.0); a field is None if the card doesn't expose it."""
     if DEMO:
-        return {g: {"power": 75, "core": -502, "mem": 0, "temp": None} for g in ("0", "1")}
+        return {g: {"power": 75, "core": -502, "mem": 0, "temp": None, "bus": b} for g, b in (("0", 1), ("1", 3))}
     h = k32.OpenFileMappingW(4, False, "MACMSharedMemory")  # FILE_MAP_READ: this view can never write a setting
     if not h:
         return {}
@@ -211,10 +210,64 @@ def parse_oc(m, n, es):
             continue  # numbered over NVIDIA cards only, the same way nvidia_cards() does
         d = struct.unpack_from("<69i", m, b)  # DWORD/LONG fields of MACM_SHARED_MEMORY_GPU_ENTRY
         fl = d[0] & 0xFFFFFFFF
+        bus = re.search(r"BUS_(\d+)", _s(m[b + es - 260:b + es]).upper())
         out[str(nv)] = {"power": d[43] if fl & 0x400 else None, "core": round(d[47] / 1000) if fl & 0x800 else None,
-                        "mem": round(d[51] / 1000) if fl & 0x1000 else None, "temp": d[55] if fl & 0x2000 else None}
+                        "mem": round(d[51] / 1000) if fl & 0x1000 else None, "temp": d[55] if fl & 0x2000 else None,
+                       "bus": int(bus.group(1)) if bus else None}
         nv += 1
     return out
+
+
+class _TS(ctypes.Structure):  # NV_GPU_THERMAL_SENSORS v2 (undocumented NVAPI query, values in 1/256 degC)
+    _fields_ = [("version", ctypes.c_uint32), ("mask", ctypes.c_uint32), ("res", ctypes.c_int32 * 8),
+                ("t", ctypes.c_int32 * 32)]
+
+
+_nvapi = None
+
+
+def mem_temps():
+    """{PCI bus: GDDR7 temperature} per NVIDIA card from NVAPI's thermal sensors. A read-only query; nothing here
+    can change a setting. shortcut: sensor 2 is memory on RTX 50 (NVIDIA dropped hotspot there); older cards differ."""
+    global _nvapi
+    if DEMO:
+        return {1: 52.0, 3: 55.0}
+    try:
+        if _nvapi is None:
+            _nvapi = False  # one attempt: no driver API means no memory temperature, never a retry loop
+            qi = ctypes.WinDLL("nvapi64.dll").nvapi_QueryInterface
+            qi.restype, qi.argtypes = ctypes.c_void_p, [ctypes.c_uint32]
+
+            def fn(i, *args):
+                p = qi(i)
+                if not p:
+                    raise OSError(f"nvapi {i:#x} missing")
+                return ctypes.CFUNCTYPE(ctypes.c_int, *args)(p)
+            if fn(0x0150E828)() != 0:  # NvAPI_Initialize
+                return {}
+            hs, n = (ctypes.c_void_p * 64)(), ctypes.c_uint32()
+            if fn(0xE5AC921F, ctypes.c_void_p, ctypes.c_void_p)(ctypes.byref(hs), ctypes.byref(n)) != 0:
+                return {}
+            get_bus = fn(0x1BE0B8E5, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))
+            by_bus = {}
+            for k in range(min(n.value, 64)):
+                b = ctypes.c_uint32()
+                if get_bus(hs[k], ctypes.byref(b)) == 0:
+                    by_bus[b.value] = hs[k]
+            _nvapi = (fn(0x65FE3AAD, ctypes.c_void_p, ctypes.POINTER(_TS)), by_bus)
+        if not _nvapi:
+            return {}
+        get, by_bus = _nvapi
+        out = {}
+        for bus, h in by_bus.items():
+            s = _TS(version=ctypes.sizeof(_TS) | 2 << 16, mask=0b111)
+            if get(h, ctypes.byref(s)) == 0 and 0 < s.t[2] / 256 < 150:  # 255 = no sensor
+                out[bus] = s.t[2] / 256
+        return out
+    except Exception:
+        log("memory temperature unavailable:\n" + traceback.format_exc())
+        _nvapi = False
+        return {}
 
 
 def demo_readings():
@@ -858,7 +911,8 @@ DIAG_Y, DIAG_H = HEAD_H + LINK_H, 364      # one-line diagram
 LOW_Y, LOW_H = DIAG_Y + DIAG_H, 196        # rails / trends / energy
 H = LOW_Y + LOW_H
 FEEDER_Y = {"1": DIAG_Y + 116, "2": DIAG_Y + 272}
-GPU_COLS = (0, 100, 168)  # x offsets of the three GPU readout columns from the GPU title
+MEM_WARN_C, MEM_MAX_C = 90, 100  # GDDR7: amber from 90 degC, red from 100 (it throttles around 105)
+GPU_COLS = (0, 112, 194)  # sized for the widest values: "1,622 rpm", "12.5 GB", "voltage"  # x offsets of the three GPU readout columns from the GPU title
 AB_EXE = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "MSI Afterburner", "MSIAfterburner.exe")
 # SCADA one-line conventions: yellow busbars, cyan equipment IDs, magenta names, muted-red measurement labels,
 # green values. A real alarm is bright red (BAD), so it never blends with the labels.
@@ -929,6 +983,7 @@ class App:
         self.hist = collections.defaultdict(lambda: collections.deque(maxlen=90))
         self.runtime, self.record, self.usb_ok, self.usb_thread, self.last_usb = None, {}, None, None, 0.0
         self.oc, self.oc_at = {}, 0.0  # Afterburner's applied clocks/limits, re-read every 5 s
+        self.memt = {}  # PCI bus -> GDDR7 temperature, re-read with them
         self.pins, self.psu, self.gpus, self.popup, self.popup_sev, self.popup_items = {}, {}, {}, None, 0, []
         self.snooze_until, self.snooze_sev = 0, 0
         self.streak, self.arrivals = collections.Counter(), collections.deque(maxlen=11)
@@ -1139,7 +1194,7 @@ class App:
         if readings is not None:
             self.collect(readings)
             if now - self.oc_at >= 5:
-                self.oc, self.oc_at = read_oc(), now
+                self.oc, self.oc_at, self.memt = read_oc(), now, mem_temps()
         self.last_frame = (readings, faults, age)
         if self.visible():  # hidden behind an alert or minimized: skip the drawing work
             self.render(self.last_frame)
@@ -1578,16 +1633,17 @@ class App:
         self.fan_specs += [((g, i), *spec) for i, spec in enumerate(specs)]
         gx = getattr(self, "col_x", 860)
         self.tip(c.create_text(gx, yf - 52, text=f"GPU{g}", fill=S_ID, font=F(14, "mono_b"), anchor="w"),
-                 f"GPU{g}: CAPPED BY = what is limiting its clock speed right now (normal). Clocks, load and VRAM are in DATA.")
+                 f"GPU{g}: MEM TEMP = its GDDR7 memory, amber from {MEM_WARN_C} °C. RTX 50 cards no longer report a "
+                 f"hotspot. Clocks and every other reading are in DATA.")
         # card model above its drawing; the cards don't report a model name, so settings.json "gpu_models" can set it
         model = (self.settings.get("gpu_models") or {}).get(brand) or f"{brand} GeForce RTX 5080"
         c.create_text(752, yf - 52, text=model.upper(), fill=S_NAME, font=F(11, "mono_m"))
-        for r, labs in enumerate((("TEMPERATURE", "LOAD", "POWER"), ("FANS", "VRAM", "CAPPED BY"))):
+        for r, labs in enumerate((("TEMP", "LOAD", "POWER"), ("FANS", "VRAM", "MEM TEMP"))):
             y = yf - 22 + r * 46
             for col, (lab, dx) in enumerate(zip(labs, GPU_COLS)):
                 c.create_text(gx + dx, y - 12, text=lab, fill=S_LBL, font=F(11), anchor="w")
                 self.text(f"g{g}_{r}{'abc'[col]}", gx + dx, y + 9, "", S_VAL, 16, "mono_m")
-        self.text(f"g{g}_tmax", gx + 54, yf - 13, "", SUB, 11)  # today's highest, beside the live temperature
+        self.text(f"g{g}_tmax", gx + 40, yf - 34, "", DIM, 11)  # today's highest, in the label row beside TEMP
         # what Afterburner has applied: one quiet line under the drawing and the readouts. Placed by place_oc().
         for k, lab in enumerate(("POWER", "CORE", "MEM", "TEMP LIMIT")):
             self.put(f"g{g}_ocl{k}", c.create_text(664, yf + 68, text=lab, fill=SUB, font=F(11, "cond"), anchor="w"))
@@ -1827,22 +1883,22 @@ class App:
             self.anim_t = time.time()
             self.animate()
         temp, power, used = v.get("GPU Temperature"), v.get("GPU Power"), v.get("GPU Memory Allocated")
-        codes = [word for lim, word in zip(LIMITS, ("power", "heat", "voltage", "idle", "sync"))
-                 if any(lab.lower().endswith(lim) and val for lab, val in v.items())]
-        limiter = (codes[0] + (" +" if len(codes) > 1 else "")) if codes else "nothing"  # plain word, fits the cell
         V = getattr(self, "vcol", S_VAL)
         tcol, pcol = level(temp or 0, 75, 85), level(power or 0, GPU_TDP_W * 0.9, GPU_TDP_W)
         self.set(f"g{g}_0a", text=f"{num(temp)} \u00b0C", fill=V if tcol == TXT2 else tcol)
         self.set(f"g{g}_0c", text=f"{num(power)} W", fill=V if pcol == TXT2 else pcol)
         self.set(f"g{g}_1a", text=f"{num(max(rpm))} rpm" if any(rpm) else "stopped", fill=V)
-        self.set(f"g{g}_1c", text=limiter, fill=V)
+        mt = self.memt.get((self.oc.get(g) or {}).get("bus"))  # GDDR7 temperature, matched to this card by PCI bus
+        mcol = level(mt or 0, MEM_WARN_C, MEM_MAX_C)
+        self.set(f"g{g}_1c", text=f"{mt:.0f} °C" if mt is not None else "-",
+                 fill=DIM if mt is None else V if mcol == TXT2 else mcol)
         load, vram = v.get("GPU Core Load"), v.get("GPU Memory Allocated")
         self.set(f"g{g}_0b", text=f"{num(load)}%" if load is not None else "-", fill=V if load is not None else DIM)
         self.set(f"g{g}_1b", text=f"{vram / 1024:.1f} GB" if vram is not None else "-", fill=V if vram is not None else DIM)
         tmax = self.day_stats.setdefault("gpu_tmax", {})
         if temp is not None:
             tmax[g] = max(tmax.get(g, temp), temp)
-        self.set(f"g{g}_tmax", text=f"max {tmax[g]:.0f}" if g in tmax else "")
+        self.set(f"g{g}_tmax", text=f"max {tmax[g]:.0f} °C" if g in tmax else "")
         oc = self.oc.get(g)
         sign = lambda x: f"{x:+d}".replace("-", "−")
         cells = (("-" if not oc else "n/a" if oc["power"] is None else f"{oc['power']}%"),
@@ -2107,7 +2163,7 @@ def selftest():
         d[0], d[43], d[47], d[51], d[55] = flags, power, core_khz, mem_khz, 83
         return struct.pack("<69i", *d).ljust(es - 260, b"\0") + gid.encode().ljust(260, b"\0")
     m = entry("VEN_1002&DEV_164E", 0, 0, 0, 0) + entry("VEN_10DE&DEV_2C02", 0x400 | 0x800 | 0x1000, 75, -502000, 1000000)
-    assert parse_oc(m, 2, es) == {"0": {"power": 75, "core": -502, "mem": 1000, "temp": None}}
+    assert parse_oc(m, 2, es) == {"0": {"power": 75, "core": -502, "mem": 1000, "temp": None, "bus": None}}
     norm = normalise(raw, gpus)
     assert ("GPU [#0]: NVIDIA GeForce RTX 5080: Dell", "GPU Temperature", 38.0, "\xb0C") in norm
     assert ("GPU [#1]: NVIDIA GeForce RTX 5080: MSI", "GPU Power", 12.7, "W") in norm

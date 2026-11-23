@@ -52,7 +52,7 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
   Each pin has its live value, a bar against the 8 A limit and a notch marking today's peak, so a short
   spike stays visible after it has passed. The cable-to-card match is worked out
   automatically from watts.
-- **Line drawings of each card** with fans that turn at their real speed, plus temperature (with today's maximum), load, power, fans, VRAM in use and what is capping its clock (*CAPPED BY: voltage / power / heat*, which is normal).
+- **Line drawings of each card** with fans that turn at their real speed, plus temperature (with today's maximum), GDDR7 memory temperature, load, power, fans and VRAM in use. (RTX 50 cards no longer report a hotspot temperature.)
 - **Afterburner settings under each card**: the power limit, core and memory clock offsets and temperature limit Afterburner has applied, read-only from its control memory. *n/a* means the card doesn't expose that setting.
 - **LINK row**: shows *ALL SENSORS OK*, or exactly which data source is missing and a button to fix it.
 - **Last 90 seconds**: the highest pin and each GPU's power over 90 s, auto-scaled.
@@ -146,6 +146,8 @@ MSI Center profile file ── kWh history ────────────�
   See [`PSU_PROTOCOL.md`](PSU_PROTOCOL.md) for the decoded protocol.
 - **Afterburner settings** (power limit, clock offsets, temperature limit) come from Afterburner's
   `MACMSharedMemory`, mapped read-only every 5 s, so Substashen can never change them.
+- **Memory temperature** comes from the NVIDIA driver's own thermal-sensor query (NVAPI, read-only) every 5 s,
+  matched to each card by its PCI bus.
 - **Lightweight**: about 0.5% of one CPU core at idle and about 30 MB of private memory. Drawing is
   retained: only changed values are updated, each screen region is repainted on its own, and drawing
   pauses while minimized.
