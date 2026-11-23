@@ -1492,8 +1492,8 @@ class App:
         for k, lab in enumerate(("OUTPUT", "EFFICIENCY", "TEMPERATURE", "FAN")):
             y = py0 + 84 + k * 60
             c.create_line(px0 + 10, y - 30, px1 - 10, y - 30, fill=GRID)
-            c.create_text(px0 + 12, y, text=lab, fill=S_LBL, font=F(11), anchor="w")
-            self.text(f"psu{k}", px1 - 12, y, "", S_VAL, 18, "mono_m", "e")
+            c.create_text(px0 + 10, y, text=lab, fill=S_LBL, font=F(11), anchor="w")
+            self.text(f"psu{k}", px1 - 10, y, "", S_VAL, 18, "mono_m", "e")
         bus_x, bus_y0, bus_y1 = 232, DIAG_Y + 52, DIAG_Y + 312
         c.create_line(px1, DIAG_Y + 194, bus_x, DIAG_Y + 194, fill=S_BUS, width=2 * SCALE)
         self.tip(c.create_line(bus_x, bus_y0, bus_x, bus_y1, fill=S_BUS, width=6 * SCALE),
@@ -1582,7 +1582,7 @@ class App:
             self.text(f"g{g}_{r}b", gx + 132, y + 9, "", S_VAL, 18, "mono_m")
         # what Afterburner has applied to this card, under its live readings
         # what Afterburner has applied: one quiet line spanning under the drawing and the readouts
-        for k, (lab, x) in enumerate((("POWER", 664), ("CORE", 802), ("MEMORY", 916), ("TEMP LIMIT", 1030))):
+        for k, (lab, x) in enumerate((("POWER", 664), ("CORE", 796), ("MEM", 900), ("TEMP LIMIT", 992))):  # TEMP LIMIT on the POWER column above
             lx1 = c.bbox(c.create_text(x, yf + 58, text=lab, fill=SUB, font=F(11, "cond"), anchor="w"))[2]
             x += (lx1 - x) / SCALE + 6  # drawn in layout units, scaled later; the text itself is already in pixels
             self.tip(self.text(f"g{g}_oc{k}", x, yf + 58, "", S_VAL, 12, "mono"),
