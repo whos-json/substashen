@@ -1581,11 +1581,11 @@ class App:
             c.create_text(gx + 132, y - 12, text=l2, fill=S_LBL, font=F(11), anchor="w")
             self.text(f"g{g}_{r}b", gx + 132, y + 9, "", S_VAL, 18, "mono_m")
         # what Afterburner has applied to this card, under its live readings
-        ox = 664  # spans under the drawing and the readouts: the panel has no room for four cells beside it
-        c.create_line(ox, yf + 47, W - 14, yf + 47, fill=GRID)
-        for k, lab in enumerate(("POWER LIMIT", "CORE OFFSET", "MEMORY OFFSET", "TEMP LIMIT")):
-            c.create_text(ox + k * 112, yf + 57, text=lab, fill=S_LBL, font=F(10), anchor="w")
-            self.tip(self.text(f"g{g}_oc{k}", ox + k * 112, yf + 73, "", S_VAL, 13, "mono_m"),
+        # what Afterburner has applied: one quiet line spanning under the drawing and the readouts
+        for k, (lab, x) in enumerate((("POWER", 664), ("CORE", 802), ("MEMORY", 916), ("TEMP LIMIT", 1030))):
+            lx1 = c.bbox(c.create_text(x, yf + 58, text=lab, fill=SUB, font=F(11, "cond"), anchor="w"))[2]
+            x += (lx1 - x) / SCALE + 6  # drawn in layout units, scaled later; the text itself is already in pixels
+            self.tip(self.text(f"g{g}_oc{k}", x, yf + 58, "", S_VAL, 12, "mono"),
                      f"GPU{g}: settings MSI Afterburner has applied (read only). Power limit is % of the card's "
                      f"{GPU_TDP_W} W default; offsets are added to stock clocks; n/a = this card doesn't expose it.")
 
