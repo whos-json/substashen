@@ -1057,7 +1057,9 @@ class App:
         if not DEMO:
             self.remember_pos()
         alarm_stop()
-        self.root.destroy()
+        # Logs and settings are written (synchronously) above. Tearing Tk down then let Tcl 9 hit an
+        # "alloc: invalid block" panic on exit, so end the process here; Windows reclaims the windows and handles.
+        os._exit(0)
 
     def open_afterburner(self):
         try:
