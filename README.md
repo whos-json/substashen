@@ -46,13 +46,14 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
 
 ## The panel
 
-- **HIGHEST PIN**: the highest of the 12 currents and how close it is to the 8 A limit, at a glance.
+- **HIGHEST PIN**: the highest of the 12 currents, how close it is to the 8 A limit, and a headroom bar (caution zone 6–8 A, red tick at the limit) you can read from across the room.
+- **Balance strip under each cable**: a band from the cable's lowest to its highest pin. Narrow means the pins share evenly; wide means one pin is doing more than its share. It turns amber at the same point the uneven-current warning fires.
 - **Power path diagram**: PSU → +12 V bus (with its safe 11.6–12.6 V range) → cable 1 and cable 2 → six pins each → the card they feed.
   Each pin has its live value and a bar against the 8 A limit. The cable-to-card match is worked out
   automatically from watts.
 - **Line drawings of each card** with fans that turn at their real speed, plus temperature, power, fans and what is capping its clock (*CAPPED BY: voltage / power / heat*, which is normal).
 - **LINK row**: shows *ALL SENSORS OK*, or exactly which data source is missing and a button to fix it.
-- **Trends**: worst pin and each GPU's power over 90 s, auto-scaled.
+- **Last 90 seconds**: the highest pin and each GPU's power over 90 s, auto-scaled.
 - **Energy**: PSU uptime and lifetime hours read from the PSU over USB, plus kWh from MSI Center's record.
 - **Hover anything** for a plain-English explanation.
 
@@ -64,7 +65,7 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
 |---|---|
 | ![Hover help](docs/screenshots/hover-help.png) | ![Night mode](docs/screenshots/night-mode.png) |
 
-Colour carries meaning only: grey and green are normal, **amber** means caution or not protected, and **red**
+Colour carries meaning only: labels and normal bars are grey, green means healthy, **amber** means caution or not protected, and **red**
 means over a limit. The design follows high-performance HMI practice: calm when healthy, loud when not.
 
 ## Requirements

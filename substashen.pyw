@@ -828,7 +828,9 @@ LINK_HELP = ("MSI Afterburner: LIVE while its data is fresh; shows the age when 
              "Pin current sensors from the PSU (12 expected). Protection needs all 12.",
              "The PSU's +12V output voltage reading.",
              "Uptime counters read from the PSU over USB once a minute (read-only).")
-S_BUS, S_ID, S_NAME, S_LBL, S_VAL, S_EQ = "#e0cc45", "#5cc8ee", "#d98ad0", "#cf7f73", "#6ee09a", "#3a7a90"
+# Calm when healthy (ISA-101): grey labels, light values; yellow bus/cyan IDs give structure; colour = attention.
+S_BUS, S_ID, S_NAME, S_LBL, S_VAL, S_EQ = "#d9c64a", "#5cc8ee", "#9aa3ab", "#8d969e", "#e2e6ea", "#3a7a90"
+BAR_OK = "#6f7a84"  # a pin bar that is fine: neutral, so amber/red ones stand out
 
 
 class App:
@@ -1354,6 +1356,15 @@ class App:
         self.tip(self.text("worst", 236, HEAD_H / 2, "", S_VAL, 19, "mono_b"),
                  "The highest of the 12 pin currents right now, and how close it is to the 8 A limit.")
         self.text("worst_sub", 336, HEAD_H / 2, "", SUB, 12)
+        # headroom: a thin 0-10 A line under the whole HIGHEST PIN group, so it reads as part of that readout
+        hx0, hx1, hy = 150, 566, HEAD_H - 6
+        hx = lambda a: hx0 + (hx1 - hx0) * a / 10
+        c.create_rectangle(hx0, hy - 1, hx1, hy + 1, fill=GRID, outline="")
+        c.create_rectangle(hx(PIN_WARN_A), hy - 1, hx(PIN_MAX_A), hy + 1, fill=mix(WARN, BG, 0.75), outline="")
+        c.create_line(hx(PIN_MAX_A), hy - 3, hx(PIN_MAX_A), hy + 3, fill=BAD)
+        self.put("hbar", c.create_rectangle(hx0, hy - 1, hx0, hy + 1, fill=S_VAL, outline=""))
+        self.tip(self.items["hbar"], "Headroom: the highest pin on a 0-10 A scale. Amber zone 6-8 A, red tick = 8 A limit.")
+        self.hbar_x = (hx0, hx1, hy)
         x = W - 14
         if time.time() < self.confirm_until:  # in-panel confirmation instead of a system dialog
             x = button(c, x, HEAD_H / 2, "KEEP RUNNING", self.cancel_quit, fg=TXT)
@@ -1426,7 +1437,7 @@ class App:
         c = self.c
         section(c, 0, DIAG_Y, W, "01", "Power path  PSU → cables → GPUs")
         x = W - 14  # colour legend, right-aligned: what the pin colours mean
-        for label, col in ((f"> {PIN_MAX_A:.0f} A LIMIT", BAD), (f"\u2265 {PIN_WARN_A:.0f} A CAUTION", WARN), ("NORMAL", S_VAL)):
+        for label, col in ((f"> {PIN_MAX_A:.0f} A LIMIT", BAD), (f"\u2265 {PIN_WARN_A:.0f} A CAUTION", WARN), ("NORMAL", BAR_OK)):
             c.create_text(x, DIAG_Y + 16, text=label, fill=SUB, font=F(11, "cond_b"), anchor="e")
             x -= font(11, "cond_b").measure(label) / SCALE + 8
             c.create_rectangle(x - 9, DIAG_Y + 12, x, DIAG_Y + 21, fill=col, outline="")
@@ -1479,15 +1490,28 @@ class App:
                         f"twice (or once over {PIN_HARD_A:.0f} A) closes GPU programs.")
             c.create_text(314, yk, text=f"P{pin}", fill=S_ID, font=F(11, "mono_m"), anchor="w")
             c.create_rectangle(348, yk - 1.5, 486, yk + 1.5, fill=GRID, outline="")
-            self.put(f"bar{n}_{k}", c.create_rectangle(348, yk - 4, 348, yk + 4, fill=S_VAL, outline=""))
+            self.put(f"bar{n}_{k}", c.create_rectangle(348, yk - 4, 348, yk + 4, fill=BAR_OK, outline=""))
             lim = 348 + 138 * PIN_MAX_A / 10
             c.create_line(lim, yk - 6, lim, yk + 6, fill=BAD, width=1.5 * SCALE)
             self.text(f"val{n}_{k}", 550, yk, "", S_VAL, 13, "mono_m", "e")
             self.tip([row, self.items[f"bar{n}_{k}"], self.items[f"val{n}_{k}"]], help_txt)
-            if n == "1" and k == len(vals) - 1:  # one amp scale under cable 1's bars serves both cables
-                for amps in (0, 4, 8, 10):
-                    c.create_text(348 + 138 * amps / 10, yk + 15, text=f"{amps} A" if amps == 10 else str(amps),
-                                  fill=BAD if amps == 8 else DIM, font=F(11))
+        # balance: a band from this cable's lowest to highest pin. Narrow = pins share evenly; wide = one pin
+        # carries more than its share, the pattern that comes before a connector overheats.
+        sy = yf + (len(vals) - 1) / 2 * 17 + 18
+        self.spread_y = getattr(self, "spread_y", {})
+        self.spread_y[n] = sy
+        c.create_text(296, sy, text="SPREAD", fill=SUB, font=F(10, "cond_b"), anchor="w")
+        c.create_rectangle(348, sy - 1.5, 486, sy + 1.5, fill=GRID, outline="")
+        self.put(f"spr{n}", c.create_rectangle(348, sy - 4, 348, sy + 4, fill="#5b636b", outline=""))
+        self.put(f"sprm{n}", c.create_line(348, sy - 7, 348, sy + 7, fill=TXT, width=1.5 * SCALE))
+        self.text(f"sprv{n}", 550, sy, "", S_VAL, 12, "mono_m", "e")
+        self.tip([self.items[f"spr{n}"], self.items[f"sprv{n}"]],
+                 f"Cable {n} balance: band = lowest to highest pin, tick = average. Narrow is good; "
+                 f"wide means uneven sharing. Warns at {IMB_SPREAD_A:.0f} A apart under load.")
+        if n == "1":  # one amp scale under cable 1 serves the bars and the balance strip of both cables
+            for amps in (0, 4, 8, 10):
+                c.create_text(348 + 138 * amps / 10, sy + 16, text=f"{amps} A" if amps == 10 else str(amps),
+                              fill=BAD if amps == 8 else DIM, font=F(11))
         c.create_line(572, yf, 650, yf, fill=S_BUS, width=2 * SCALE)
         self.text(f"fi{n}", 588, yf - 15, "", S_VAL, 13, "mono_m")  # cable total current, above the line
         self.text(f"fp{n}", 588, yf + 15, "", S_VAL, 13, "mono_m")  # and the watts it carries, below
@@ -1526,12 +1550,11 @@ class App:
         section(c, 0, y0, 746, "02", "Last 90 seconds")
         rows = [("worst", "HIGHEST PIN", "A")] + [(g, f"GPU{g} POWER", "W") for g in sorted(self.gpus)[:2]]
         for i, (key, label, unit) in enumerate(rows):
-            ty0, ty1 = y0 + 40 + i * 52, y0 + 78 + i * 52
+            ty0, ty1 = y0 + 48 + i * 52, y0 + 78 + i * 52  # label row sits clear above the plot and its limit line
             tx0, tx1 = 14, 746 - 52
-            c.create_text(tx0, ty0 - 7, text=label, fill=S_ID, font=F(11, "mono_b"), anchor="w")
-            self.text(f"peak{key}", tx1, ty0 - 7, "", TXT2, 11, "mono", "e")
+            c.create_text(tx0, ty0 - 11, text=label, fill=S_LBL, font=F(11, "mono_b"), anchor="w")
+            self.text(f"peak{key}", tx1, ty0 - 11, "", TXT2, 11, "mono", "e")
             c.create_line(tx0, ty1, tx1, ty1, fill=GRID)
-            c.create_line(tx0, ty0, tx1, ty0, fill=GRID)
             self.text(f"top{key}", tx1 + 44, ty0, "", SUB, 10, "mono", "e")
             if key == "worst":  # the 8 A limit, drawn whenever it falls inside the current scale
                 self.put("limworst", c.create_line(tx0, ty0, tx1, ty0, fill=BAD, dash=(4, 3), state="hidden"))
@@ -1592,6 +1615,8 @@ class App:
         if readings is None:
             self.set("worst", text="-", fill=DIM)
             self.set("worst_sub", text="no pin data")
+            hx0, _hx1, hy = self.hbar_x
+            self.move("hbar", (hx0, hy - 1, hx0, hy + 1))  # no data: empty, never a stale reading
             return
         psu, v12 = self.psu, self.psu.get("+12V")
         self.vcol = V = S_VAL if age <= STALE_S else DIM  # stale values dim instead of looking live
@@ -1600,10 +1625,15 @@ class App:
             a, n, p = max(every)
             col = level(a, PIN_WARN_A, PIN_MAX_A)
             self.set("worst", text=f"{a:.2f} A", fill=V if col == TXT2 else col)
+            hx0, hx1, hy = self.hbar_x
+            self.move("hbar", (hx0, hy - 1, hx0 + (hx1 - hx0) * min(a, 10) / 10, hy + 1))
+            self.set("hbar", fill=V if col == TXT2 else col)
             self.set("worst_sub", text=f"{a / PIN_MAX_A * 100:.0f}% of {PIN_MAX_A:.0f} A limit  ·  cable {n} pin {p}")
         else:
             self.set("worst", text="-", fill=DIM)
             self.set("worst_sub", text="no pin data")
+            hx0, _hx1, hy = self.hbar_x
+            self.move("hbar", (hx0, hy - 1, hx0, hy + 1))  # no data: empty, never a stale reading
         if self.view == "compact":
             return
         vals = (f"{num(psu.get('PSU Power Out'))} W", f"{num(psu.get('PSU Efficiency'), 1)} %",
@@ -1632,8 +1662,20 @@ class App:
                 self.set(f"cond{n}_{k}", fill=S_BUS if col == TXT2 else col)
                 yk = FEEDER_Y[n] + (k - (len(vals) - 1) / 2) * 17
                 self.move(f"bar{n}_{k}", (348, yk - 4, 348 + 138 * min(a, 10) / 10, yk + 4))
-                self.set(f"bar{n}_{k}", fill=live)
+                self.set(f"bar{n}_{k}", fill=BAR_OK if col == TXT2 else col)
                 self.set(f"val{n}_{k}", text=f"{a:.2f}", fill=live)
+            if vals and n in getattr(self, "spread_y", {}):
+                amps = [a for _, a in vals]
+                lo, hi, avg, sy = min(amps), max(amps), sum(amps) / len(amps), self.spread_y[n]
+                spread = hi - lo
+                loaded = sum(amps) >= IMB_MIN_TOTAL_A
+                col = (WARN if loaded and spread >= IMB_SPREAD_A else
+                       mix(WARN, BG, 0.45) if loaded and spread >= IMB_SPREAD_A * 0.75 else "#5b636b")
+                x = lambda a: 348 + 138 * min(a, 10) / 10
+                self.move(f"spr{n}", (x(lo), sy - 4, max(x(hi), x(lo) + 2), sy + 4))
+                self.set(f"spr{n}", fill=col)
+                self.move(f"sprm{n}", (x(avg), sy - 7, x(avg), sy + 7))
+                self.set(f"sprv{n}", text=f"{spread:.2f}", fill=V if col == "#5b636b" else WARN)
             g = self.cable_map.get(n)
             gpu = self.gpus.get(g)
             if gpu:
