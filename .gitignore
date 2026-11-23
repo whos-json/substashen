@@ -1,0 +1,11 @@
+# personal, machine-specific state and logs
+settings.json
+settings.json.tmp
+incidents.log
+incidents.log.old
+substashen.log
+substashen.log.old
+# built locally by launcher\build.bat
+Substashen.exe
+__pycache__/
+*.pyc
