@@ -52,16 +52,16 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
   Each pin has its live value, a bar against the 8 A limit and a notch marking today's peak, so a short
   spike stays visible after it has passed. The cable-to-card match is worked out
   automatically from watts.
-- **Line drawings of each card** with fans that turn at their real speed, plus temperature, power, fans and what is capping its clock (*CAPPED BY: voltage / power / heat*, which is normal).
-- **Afterburner settings under each card**: the power limit (% and watts), core and memory clock offsets and temperature limit Afterburner has applied, read-only from its control memory. *n/a* means the card doesn't expose that setting.
+- **Line drawings of each card** with fans that turn at their real speed, plus temperature (with today's maximum), load, power, fans, VRAM in use and what is capping its clock (*CAPPED BY: voltage / power / heat*, which is normal).
+- **Afterburner settings under each card**: the power limit, core and memory clock offsets and temperature limit Afterburner has applied, read-only from its control memory. *n/a* means the card doesn't expose that setting.
 - **LINK row**: shows *ALL SENSORS OK*, or exactly which data source is missing and a button to fix it.
 - **Last 90 seconds**: the highest pin and each GPU's power over 90 s, auto-scaled.
 - **Energy**: PSU uptime and lifetime hours read from the PSU over USB, plus kWh from MSI Center's record.
 - **Hover anything** for a plain-English explanation.
 
-| Standard view | Compact view |
-|---|---|
-| ![Standard view](docs/screenshots/panel-standard.png) | ![Compact view](docs/screenshots/panel-compact.png) |
+**Standard view** (without the trends and energy row):
+
+![Standard view](docs/screenshots/panel-standard.png)
 
 | Hover help | Night dimming |
 |---|---|
@@ -106,7 +106,7 @@ pythonw substashen.pyw
 | Key / action | Does |
 |---|---|
 | **TEST** button / `T` | Rings the alarm and shows the alert screen; nothing is closed |
-| `C` or double-click the header | Cycles **Full → Standard → Compact** |
+| `C` or double-click the header | Switches between the **Full** and **Standard** view |
 | `D` / **DATA** | Every raw reading, plus the latest events |
 | `M` / **–** | Minimize to the taskbar (protection keeps running) |
 | `N` | Night dimming on/off (automatic 23:00–07:00) |

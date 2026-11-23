@@ -284,7 +284,7 @@ def fault_value(f):
     return f.get("show") or f"{f['val']:.2f} {f['unit']}"
 
 
-VIEWS = ("full", "standard", "compact")
+VIEWS = ("full", "standard")
 SEVERITY = {"test": 0, "offline": 1, "volt": 2, "pin": 3}  # a test never outranks or snoozes a real fault
 
 # Warn-only rules: amber WARNING + incident log, never close anything. Thresholds are starting points to tune
@@ -858,6 +858,7 @@ DIAG_Y, DIAG_H = HEAD_H + LINK_H, 364      # one-line diagram
 LOW_Y, LOW_H = DIAG_Y + DIAG_H, 196        # rails / trends / energy
 H = LOW_Y + LOW_H
 FEEDER_Y = {"1": DIAG_Y + 116, "2": DIAG_Y + 272}
+GPU_COLS = (0, 100, 168)  # x offsets of the three GPU readout columns from the GPU title
 AB_EXE = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "MSI Afterburner", "MSIAfterburner.exe")
 # SCADA one-line conventions: yellow busbars, cyan equipment IDs, magenta names, muted-red measurement labels,
 # green values. A real alarm is bright red (BAD), so it never blends with the labels.
@@ -900,8 +901,8 @@ class App:
         on_screen = pos and any(x <= pos[0] < x + w - 50 and y <= pos[1] < y + h - 50 for x, y, w, h, _ in monitors())
         r.geometry(f"+{pos[0]}+{pos[1]}" if on_screen else
                    f"+{mx + max(0, round((mw - W * SCALE) / 2))}+{my + round(16 * SCALE)}")  # top of home monitor
-        # three sizes: full (everything), standard (no trend/energy row), compact (header + LINK strip)
-        self.view = self.settings.get("view") or ("compact" if self.settings.get("compact") else "standard")
+        # two sizes: full (everything) and standard (no trend/energy row); an old saved "compact" becomes standard
+        self.view = self.settings.get("view") or "standard"
         self.view = self.view if self.view in VIEWS else "standard"
         self.night, self.night_force = False, None  # night dimming: automatic by hour, N key forces on/off
         self.idle_alpha = float(self.settings.get("idle_opacity", 1.0))  # 1.0 = off; O key toggles 0.8
@@ -950,8 +951,8 @@ class App:
         return e.x > self.c.winfo_width() - grip and e.y > self.c.winfo_height() - grip
 
     def ph(self):
-        """Panel height: header + LINK only in compact mode."""
-        return {"compact": HEAD_H + LINK_H, "standard": LOW_Y}.get(self.view, H)
+        """Panel height: the standard view stops above the trend/energy row."""
+        return LOW_Y if self.view == "standard" else H
 
     def on_key(self, e):
         action = {"t": self.test_alert, "d": self.toggle_table, "m": self.minimize, "c": self.toggle_compact,
@@ -959,7 +960,7 @@ class App:
         if action:
             action()
 
-    def toggle_compact(self):  # C key / double-click header: full -> standard -> compact -> full
+    def toggle_compact(self):  # C key / double-click header: full <-> standard
         self.view = VIEWS[(VIEWS.index(self.view) + 1) % len(VIEWS)]
         self.settings["view"] = self.view
         self.settings.pop("compact", None)
@@ -1395,19 +1396,20 @@ class App:
         # header
         c.create_line(0, HEAD_H, W, HEAD_H, fill=LINE)
         self.tip(c.create_text(14, HEAD_H / 2, text=APP.upper(), fill=TXT, font=F(14, "mono_b"), anchor="w"),
-                 "Keys: T test  D data  M minimize  C size (full/standard/compact)  N night  O see-through.  Double-click header: size.")
+                 "Keys: T test  D data  M minimize  C size (full/standard)  N night  O see-through.  Double-click header: size.")
         self.tip(c.create_text(150, HEAD_H / 2, text="HIGHEST PIN", fill=SUB, font=F(11, "cond_b"), anchor="w"),
                  "The highest of the 12 pin currents right now, and how close it is to the 8 A limit.")
         self.tip(self.text("worst", 236, HEAD_H / 2, "", S_VAL, 19, "mono_b"),
                  "The highest of the 12 pin currents right now, and how close it is to the 8 A limit.")
-        self.text("worst_sub", 336, HEAD_H / 2, "", SUB, 12)
-        # headroom: a thin 0-10 A line under the whole HIGHEST PIN group, so it reads as part of that readout
-        hx0, hx1, hy = 150, 566, HEAD_H - 6
+        self.text("worst_sub", 466, HEAD_H / 2, "", SUB, 12)
+        c.create_line(136, HEAD_H / 2 - 10, 136, HEAD_H / 2 + 10, fill=LINE)
+        # headroom gauge inline between the value and its caption: 0-10 A, caution zone shaded, 8 A limit ticked
+        hx0, hx1, hy = 318, 450, HEAD_H / 2
         hx = lambda a: hx0 + (hx1 - hx0) * a / 10
-        c.create_rectangle(hx0, hy - 1, hx1, hy + 1, fill=GRID, outline="")
-        c.create_rectangle(hx(PIN_WARN_A), hy - 1, hx(PIN_MAX_A), hy + 1, fill=mix(WARN, BG, 0.75), outline="")
-        c.create_line(hx(PIN_MAX_A), hy - 3, hx(PIN_MAX_A), hy + 3, fill=BAD)
-        self.put("hbar", c.create_rectangle(hx0, hy - 1, hx0, hy + 1, fill=S_VAL, outline=""))
+        c.create_rectangle(hx0, hy - 3, hx1, hy + 3, fill=GRID, outline="")
+        c.create_rectangle(hx(PIN_WARN_A), hy - 3, hx(PIN_MAX_A), hy + 3, fill=mix(WARN, BG, 0.8), outline="")
+        self.put("hbar", c.create_rectangle(hx0, hy - 3, hx0, hy + 3, fill=S_VAL, outline=""))
+        c.create_line(hx(PIN_MAX_A), hy - 7, hx(PIN_MAX_A), hy + 7, fill=BAD, width=1.5 * SCALE)
         self.tip(self.items["hbar"], "Headroom: the highest pin on a 0-10 A scale. Amber zone 6-8 A, red tick = 8 A limit.")
         self.hbar_x = (hx0, hx1, hy)
         x = W - 14
@@ -1426,6 +1428,8 @@ class App:
             x = button(c, x - 6, HEAD_H / 2, "TEST", self.test_alert,
                        hover=lambda i: self.tip(i, "Ring the alarm and show the alert screen. Nothing is closed.")) - 18
         sq = x - font(12, "mono_b").measure("NOT PROTECTED") / SCALE - 18  # room for the longest state
+        self.col_x = sq + 18  # the GPU readout column starts on the same line as the state text
+        c.create_line(sq - 16, HEAD_H / 2 - 10, sq - 16, HEAD_H / 2 + 10, fill=LINE)
         self.put("status_sq", c.create_rectangle(sq, HEAD_H / 2 - 5, sq + 10, HEAD_H / 2 + 5, fill=OK, outline=""))
         self.tip(self.text("status", sq + 18, HEAD_H / 2, "", OK, 12, "mono_b", "w"),
                  "PROTECTED: all 12 pin sensors are live. NOT PROTECTED: data missing or stale (see LINK).")
@@ -1454,9 +1458,7 @@ class App:
                                                state="hidden"))
         self.text("help_t", 14, ly, "", TXT, 12, "cond_b", "w")
         c.itemconfig(self.items["help_t"], state="hidden")
-        if self.view == "compact":
-            pass  # header + LINK only
-        elif not live:
+        if not live:
             c.create_text(14, DIAG_Y + 40, text="WAITING FOR MSI AFTERBURNER", fill=WARN, font=F(14, "cond_b"), anchor="w")
             c.create_text(14, DIAG_Y + 66, text="Substashen reads MSI Afterburner's monitoring data and connects "
                           "automatically as soon as it is running.", fill=SUB, font=F(12, "cond"), anchor="w")
@@ -1574,26 +1576,45 @@ class App:
         specs = draw_gpu_art(c, 664, yf - 34, 176, 68, "msi" if brand == "MSI" else "dell",
                              [self.fan_angle[(g, i)] for i in range(3)])
         self.fan_specs += [((g, i), *spec) for i, spec in enumerate(specs)]
-        gx = 860
-        self.tip(c.create_text(gx, yf - 56, text=f"GPU{g}", fill=S_ID, font=F(14, "mono_b"), anchor="w"),
+        gx = getattr(self, "col_x", 860)
+        self.tip(c.create_text(gx, yf - 52, text=f"GPU{g}", fill=S_ID, font=F(14, "mono_b"), anchor="w"),
                  f"GPU{g}: CAPPED BY = what is limiting its clock speed right now (normal). Clocks, load and VRAM are in DATA.")
         # card model above its drawing; the cards don't report a model name, so settings.json "gpu_models" can set it
         model = (self.settings.get("gpu_models") or {}).get(brand) or f"{brand} GeForce RTX 5080"
-        c.create_text(752, yf - 48, text=model.upper(), fill=S_NAME, font=F(11, "mono_m"))
-        for r, (l1, l2) in enumerate((("TEMPERATURE", "POWER"), ("FANS", "CAPPED BY"))):
+        c.create_text(752, yf - 52, text=model.upper(), fill=S_NAME, font=F(11, "mono_m"))
+        for r, labs in enumerate((("TEMPERATURE", "LOAD", "POWER"), ("FANS", "VRAM", "CAPPED BY"))):
             y = yf - 22 + r * 46
-            c.create_text(gx, y - 12, text=l1, fill=S_LBL, font=F(11), anchor="w")
-            self.text(f"g{g}_{r}a", gx, y + 9, "", S_VAL, 18, "mono_m")
-            c.create_text(gx + 132, y - 12, text=l2, fill=S_LBL, font=F(11), anchor="w")
-            self.text(f"g{g}_{r}b", gx + 132, y + 9, "", S_VAL, 18, "mono_m")
-        # what Afterburner has applied to this card, under its live readings
-        # what Afterburner has applied: one quiet line spanning under the drawing and the readouts
-        for k, (lab, x) in enumerate((("POWER", 664), ("CORE", 796), ("MEM", 900), ("TEMP LIMIT", 992))):  # TEMP LIMIT on the POWER column above
-            lx1 = c.bbox(c.create_text(x, yf + 58, text=lab, fill=SUB, font=F(11, "cond"), anchor="w"))[2]
-            x += (lx1 - x) / SCALE + 6  # drawn in layout units, scaled later; the text itself is already in pixels
-            self.tip(self.text(f"g{g}_oc{k}", x, yf + 58, "", S_VAL, 12, "mono"),
+            for col, (lab, dx) in enumerate(zip(labs, GPU_COLS)):
+                c.create_text(gx + dx, y - 12, text=lab, fill=S_LBL, font=F(11), anchor="w")
+                self.text(f"g{g}_{r}{'abc'[col]}", gx + dx, y + 9, "", S_VAL, 16, "mono_m")
+        self.text(f"g{g}_tmax", gx + 54, yf - 13, "", SUB, 11)  # today's highest, beside the live temperature
+        # what Afterburner has applied: one quiet line under the drawing and the readouts. Placed by place_oc().
+        for k, lab in enumerate(("POWER", "CORE", "MEM", "TEMP LIMIT")):
+            self.put(f"g{g}_ocl{k}", c.create_text(664, yf + 68, text=lab, fill=SUB, font=F(11, "cond"), anchor="w"))
+            self.tip(self.text(f"g{g}_oc{k}", 664, yf + 68, "", S_VAL, 12, "mono"),
                      f"GPU{g}: settings MSI Afterburner has applied (read only). Power limit is % of the card's "
-                     f"{GPU_TDP_W} W default; offsets are added to stock clocks; n/a = this card doesn't expose it.")
+                     f"{GPU_TDP_W} W default (75% = {GPU_TDP_W * 75 // 100} W); offsets are added to stock clocks; "
+                     f"n/a = this card doesn't expose it.")
+        self.oc_gx = gx
+        self.oc_y = getattr(self, "oc_y", {})
+        self.oc_y[g] = yf + 68
+
+    def place_oc(self, g, y):
+        """Lay out the settings row from what it shows: MEM and TEMP LIMIT on the first two readout columns when
+        everything fits, else four evenly spaced cells (wide values such as a +3000 MHz memory offset)."""
+        c, gx = self.c, self.oc_gx
+        bw = lambda name: (lambda b: (b[2] - b[0]) / SCALE)(c.bbox(self.items[name]))  # text is in pixels already
+        lw = [bw(f"g{g}_ocl{k}") for k in range(4)]
+        cw = [lw[k] + 6 + bw(f"g{g}_oc{k}") for k in range(4)]
+        gap = (gx - 664 - cw[0] - cw[1]) / 2
+        if gap >= 12 and cw[2] <= GPU_COLS[1] - 12 and gx + GPU_COLS[1] + cw[3] <= W - 14:
+            xs = [664, 664 + cw[0] + gap, gx, gx + GPU_COLS[1]]
+        else:
+            gap = max(8, (W - 14 - 664 - sum(cw)) / 3)
+            xs = [664 + sum(cw[:k]) + k * gap for k in range(4)]
+        for k, x in enumerate(xs):
+            self.move(f"g{g}_ocl{k}", (x, y))
+            self.move(f"g{g}_oc{k}", (x + lw[k] + 6, y))
 
     def build_lower(self):
         c = self.c
@@ -1607,7 +1628,7 @@ class App:
         for i, (key, label, unit) in enumerate(rows):
             ty0, ty1 = y0 + 48 + i * 52, y0 + 78 + i * 52  # label row sits clear above the plot and its limit line
             tx0, tx1 = 14, 746 - 52
-            c.create_text(tx0, ty0 - 11, text=label, fill=S_LBL, font=F(11, "mono_b"), anchor="w")
+            c.create_text(tx0, ty0 - 11, text=label, fill=S_LBL, font=F(11), anchor="w")
             self.text(f"peak{key}", tx1, ty0 - 11, "", TXT2, 11, "mono", "e")
             c.create_line(tx0, ty1, tx1, ty1, fill=GRID)
             self.text(f"top{key}", tx1 + 44, ty0, "", SUB, 10, "mono", "e")
@@ -1619,12 +1640,12 @@ class App:
         # energy
         section(c, 746, y0, W, "03", "Energy", "PSU USB + MSI CENTER", DIM)
         for k, lab in enumerate(("PSU ON FOR", "PSU LIFETIME", "TOTAL ENERGY")):
-            c.create_text(760, y0 + 42 + k * 50, text=lab, fill=S_LBL, font=F(11), anchor="w")
-            self.text(f"en{k}", 760, y0 + 62 + k * 50, "", S_VAL, 16, "mono_m")
+            c.create_text(760, y0 + 37 + k * 52, text=lab, fill=S_LBL, font=F(11), anchor="w")
+            self.text(f"en{k}", 760, y0 + 58 + k * 52, "", S_VAL, 16, "mono_m")
         today = datetime.date.today()
         self.days = [today - datetime.timedelta(d) for d in range(6, -1, -1)]
         bx0, bx1 = 900, W - 14
-        c.create_text(bx0, y0 + 40, text="ENERGY PER DAY (kWh)", fill=SUB, font=F(10, "cond_b"), anchor="w")
+        c.create_text(bx0, y0 + 37, text="ENERGY PER DAY (kWh)", fill=S_LBL, font=F(11), anchor="w")
         bw = (bx1 - bx0) / 7
         self.ebox = (bx0, bw, y0 + 60, H - 26)  # headroom: the tallest bar's value clears the caption
         c.create_line(bx0, H - 26, bx1, H - 26, fill=LINE)
@@ -1672,7 +1693,7 @@ class App:
             self.set("worst", text="-", fill=DIM)
             self.set("worst_sub", text="no pin data")
             hx0, _hx1, hy = self.hbar_x
-            self.move("hbar", (hx0, hy - 1, hx0, hy + 1))  # no data: empty, never a stale reading
+            self.move("hbar", (hx0, hy - 3, hx0, hy + 3))  # no data: empty, never a stale reading
             return
         psu, v12 = self.psu, self.psu.get("+12V")
         self.vcol = V = S_VAL if age <= STALE_S else DIM  # stale values dim instead of looking live
@@ -1682,16 +1703,14 @@ class App:
             col = level(a, PIN_WARN_A, PIN_MAX_A)
             self.set("worst", text=f"{a:.2f} A", fill=V if col == TXT2 else col)
             hx0, hx1, hy = self.hbar_x
-            self.move("hbar", (hx0, hy - 1, hx0 + (hx1 - hx0) * min(a, 10) / 10, hy + 1))
+            self.move("hbar", (hx0, hy - 3, hx0 + (hx1 - hx0) * min(a, 10) / 10, hy + 3))
             self.set("hbar", fill=V if col == TXT2 else col)
-            self.set("worst_sub", text=f"{a / PIN_MAX_A * 100:.0f}% of {PIN_MAX_A:.0f} A limit  ·  cable {n} pin {p}")
+            self.set("worst_sub", text=f"{a / PIN_MAX_A * 100:.0f}% of limit  ·  cable {n} pin {p}")
         else:
             self.set("worst", text="-", fill=DIM)
             self.set("worst_sub", text="no pin data")
             hx0, _hx1, hy = self.hbar_x
-            self.move("hbar", (hx0, hy - 1, hx0, hy + 1))  # no data: empty, never a stale reading
-        if self.view == "compact":
-            return
+            self.move("hbar", (hx0, hy - 3, hx0, hy + 3))  # no data: empty, never a stale reading
         vals = (f"{num(psu.get('PSU Power Out'))} W", f"{num(psu.get('PSU Efficiency'), 1)} %",
                 f"{num(psu.get('PSU Temperature'))} \u00b0C", f"{num(psu.get('PSU Fan'))} rpm")
         for k, v in enumerate(vals):
@@ -1814,17 +1833,27 @@ class App:
         V = getattr(self, "vcol", S_VAL)
         tcol, pcol = level(temp or 0, 75, 85), level(power or 0, GPU_TDP_W * 0.9, GPU_TDP_W)
         self.set(f"g{g}_0a", text=f"{num(temp)} \u00b0C", fill=V if tcol == TXT2 else tcol)
-        self.set(f"g{g}_0b", text=f"{num(power)} W", fill=V if pcol == TXT2 else pcol)
+        self.set(f"g{g}_0c", text=f"{num(power)} W", fill=V if pcol == TXT2 else pcol)
         self.set(f"g{g}_1a", text=f"{num(max(rpm))} rpm" if any(rpm) else "stopped", fill=V)
-        self.set(f"g{g}_1b", text=limiter, fill=V)
+        self.set(f"g{g}_1c", text=limiter, fill=V)
+        load, vram = v.get("GPU Core Load"), v.get("GPU Memory Allocated")
+        self.set(f"g{g}_0b", text=f"{num(load)}%" if load is not None else "-", fill=V if load is not None else DIM)
+        self.set(f"g{g}_1b", text=f"{vram / 1024:.1f} GB" if vram is not None else "-", fill=V if vram is not None else DIM)
+        tmax = self.day_stats.setdefault("gpu_tmax", {})
+        if temp is not None:
+            tmax[g] = max(tmax.get(g, temp), temp)
+        self.set(f"g{g}_tmax", text=f"max {tmax[g]:.0f}" if g in tmax else "")
         oc = self.oc.get(g)
         sign = lambda x: f"{x:+d}".replace("-", "−")
-        cells = (("-" if not oc else "n/a" if oc["power"] is None else f"{oc['power']}% · {GPU_TDP_W * oc['power'] // 100} W"),
+        cells = (("-" if not oc else "n/a" if oc["power"] is None else f"{oc['power']}%"),
                  ("-" if not oc else "n/a" if oc["core"] is None else f"{sign(oc['core'])} MHz"),
                  ("-" if not oc else "n/a" if oc["mem"] is None else f"{sign(oc['mem'])} MHz"),
                  ("-" if not oc else "n/a" if oc["temp"] is None else f"{oc['temp']} °C"))
         for k, txt in enumerate(cells):
             self.set(f"g{g}_oc{k}", text=txt, fill=V if txt not in ("-", "n/a") else DIM)
+        if self.cache.get("ocrow" + g) != cells:  # re-place only when the text changes (every few seconds at most)
+            self.cache["ocrow" + g] = cells
+            self.place_oc(g, self.oc_y[g])
 
     def fill_table(self, readings):
         t = self.table
@@ -1967,12 +1996,14 @@ class App:
                              fill="#000000", font=F(18, "mono_b"), anchor="w")
         clock = c.create_text(sw - 24, 26, text=time.strftime("%H:%M:%S"), fill="#000000", font=F(18, "mono_b"), anchor="e")
         self.flash_items.append((c, band, frame, head, clock, accent))
-        x = max(48, sw * 0.08)
-        col_w = min(980, sw - 2 * x)
-        y = max(110, sh * 0.12)
+        x = max(48, sw * 0.07)
+        # wide screens: the facts and the button on the left, every pin large on the right; else one column
+        two_col = pin_fault and bool(self.pins) and sw >= 1400
+        col_w = min(860, sw * 0.42) if two_col else min(980, sw - 2 * x)
+        y = top = max(120, (sh - 500) / 2) if two_col else max(110, sh * 0.12)  # two columns: centred
         c.create_text(x, y, text=f["title"].upper(), fill=accent, font=F(30, "cond_b"), anchor="w")
         y += 26
-        big = font(min(170, sw // 7), "mono_b")
+        big = font(min(170, sw // 7, round(col_w / 4.2)), "mono_b")
         c.create_text(x - 8, y, text=fault_value(f), fill=TXT, font=big, anchor="nw")
         y += big.metrics("linespace") / k + 8
         kv = [("Location", f["where"]), ("Limit", f["limit"])]
@@ -1998,9 +2029,14 @@ class App:
                           width=col_w * k)
             y += 70
             if self.pins:
-                draw_pins(c, x, x + col_w, y + 20, y + 240, self.pins, 14, self.psu.get("+12V"),
-                          {re.search(r"_(\d)", kk).group(1): vv for kk, vv in self.psu.items() if kk.endswith("Alarm")})
-                y += 320
+                alarms = {re.search(r"_(\d)", kk).group(1): vv for kk, vv in self.psu.items() if kk.endswith("Alarm")}
+                if two_col:
+                    rx0, rx1 = x + col_w + sw * 0.05, sw - x
+                    c.create_text(rx0, top, text="ALL 12 PINS NOW", fill=SUB, font=F(18, "cond_b"), anchor="w")
+                    draw_pins(c, rx0, rx1, top + 70, top + min(520, sh * 0.48), self.pins, 18, self.psu.get("+12V"), alarms)
+                else:
+                    draw_pins(c, x, x + col_w, y + 20, y + 240, self.pins, 14, self.psu.get("+12V"), alarms)
+                    y += 320
         elif kind == "volt":
             draw_rail(c, x, x + col_w, y + 20, f["val"], 8)
             y += 70
@@ -2008,7 +2044,7 @@ class App:
         b = c.create_rectangle(x, y, x + 320, y + 64, fill=accent, outline="")
         bt = c.create_text(x + 160, y + 32, text="ACKNOWLEDGE  \u23ce", fill="#000000", font=F(20, "mono_b"))
         c.create_text(x + 344, y + 32, text=f"Alerts pause {SNOOZE_S} s after this. A worse fault still alerts, and a pin "
-                      "fault keeps closing GPU programs.", fill=SUB, font=F(14, "cond"), anchor="w", width=(col_w - 344) * k)
+                      "fault keeps closing GPU programs.", fill=SUB, font=F(16, "cond"), anchor="w", width=(col_w - 344) * k)
         for item in (b, bt):
             c.tag_bind(item, "<Button-1>", lambda e: self.ack())
             c.tag_bind(item, "<Enter>", lambda e: (c.itemconfig(b, fill=TXT), c.config(cursor="hand2")))
