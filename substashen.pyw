@@ -1638,7 +1638,7 @@ class App:
         # card model above its drawing; the cards don't report a model name, so settings.json "gpu_models" can set it
         model = (self.settings.get("gpu_models") or {}).get(brand) or f"{brand} GeForce RTX 5080"
         c.create_text(752, yf - 52, text=model.upper(), fill=S_NAME, font=F(11, "mono_m"))
-        for r, labs in enumerate((("TEMP", "LOAD", "POWER"), ("FANS", "VRAM", "MEM TEMP"))):
+        for r, labs in enumerate((("TEMP", "MEM TEMP", "POWER"), ("FANS", "VRAM", "LOAD"))):
             y = yf - 22 + r * 46
             for col, (lab, dx) in enumerate(zip(labs, GPU_COLS)):
                 c.create_text(gx + dx, y - 12, text=lab, fill=S_LBL, font=F(11), anchor="w")
@@ -1890,10 +1890,10 @@ class App:
         self.set(f"g{g}_1a", text=f"{num(max(rpm))} rpm" if any(rpm) else "stopped", fill=V)
         mt = self.memt.get((self.oc.get(g) or {}).get("bus"))  # GDDR7 temperature, matched to this card by PCI bus
         mcol = level(mt or 0, MEM_WARN_C, MEM_MAX_C)
-        self.set(f"g{g}_1c", text=f"{mt:.0f} °C" if mt is not None else "-",
+        self.set(f"g{g}_0b", text=f"{mt:.0f} °C" if mt is not None else "-",
                  fill=DIM if mt is None else V if mcol == TXT2 else mcol)
         load, vram = v.get("GPU Core Load"), v.get("GPU Memory Allocated")
-        self.set(f"g{g}_0b", text=f"{num(load)}%" if load is not None else "-", fill=V if load is not None else DIM)
+        self.set(f"g{g}_1c", text=f"{num(load)}%" if load is not None else "-", fill=V if load is not None else DIM)
         self.set(f"g{g}_1b", text=f"{vram / 1024:.1f} GB" if vram is not None else "-", fill=V if vram is not None else DIM)
         tmax = self.day_stats.setdefault("gpu_tmax", {})
         if temp is not None:
