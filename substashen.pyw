@@ -631,7 +631,7 @@ def read_msi_record():
 BG, PANEL, LINE, GRID = "#0b0c0e", "#0b0c0e", "#23272c", "#16191d"
 TXT, TXT2, SUB, DIM = "#eceef0", "#cdd2d7", "#aab2b9", "#7a838c"
 OK, WARN, BAD = "#4fd18b", "#ffb020", "#ff453a"
-GOLD = "#a8893a"
+GOLD = "#6e6446"  # card edge fingers: muted so nothing normal looks like caution amber
 FONT = {"mono": "Consolas", "mono_m": "Consolas", "mono_b": "Consolas", "cond": "Segoe UI", "cond_b": "Segoe UI"}
 SCALE = 1.0  # Windows display scaling (1.25 at 125 %). Layout is written at 100 %, then canvas.scale()d.
 _fonts = {}
@@ -867,7 +867,7 @@ LINK_HELP = ("MSI Afterburner: LIVE while its data is fresh; shows the age when 
              "The PSU's +12V output voltage reading.",
              "Uptime counters read from the PSU over USB once a minute (read-only).")
 # Calm when healthy (ISA-101): grey labels, light values; yellow bus/cyan IDs give structure; colour = attention.
-S_BUS, S_ID, S_NAME, S_LBL, S_VAL, S_EQ = "#d9c64a", "#5cc8ee", "#9aa3ab", "#8d969e", "#e2e6ea", "#3a7a90"
+S_BUS, S_ID, S_NAME, S_LBL, S_VAL, S_EQ = "#8e9aa6", "#5cc8ee", "#9aa3ab", "#8d969e", "#e2e6ea", "#3a7a90"
 BAR_OK = "#6f7a84"  # a pin bar that is fine: neutral, so amber/red ones stand out
 
 
@@ -1104,7 +1104,7 @@ class App:
 
     @staticmethod
     def new_day():
-        return {"date": datetime.date.today(), "peak": {}, "above_warn_s": 0.0, "max_spread": 0.0, "alarms": 0,
+        return {"date": datetime.date.today(), "peak": {}, "pin_peak": {}, "above_warn_s": 0.0, "max_spread": 0.0, "alarms": 0,
                 "warnings": 0}
 
     def write_day(self, label="DAILY"):
@@ -1236,6 +1236,8 @@ class App:
         for n, v in self.pins.items():
             amps = [a for _, a in v]
             d["peak"][n] = max(d["peak"].get(n, 0.0), max(amps))
+            for pin, a in v:
+                d["pin_peak"][n, pin] = max(d["pin_peak"].get((n, pin), 0.0), a)
             d["max_spread"] = max(d["max_spread"], max(amps) - min(amps))
         if every and max(every) >= PIN_WARN_A:
             d["above_warn_s"] += dt
@@ -1530,10 +1532,12 @@ class App:
             self.put(f"cond{n}_{k}", c.create_line(292, yf, 308, yk, 556, yk, 572, yf, fill=S_BUS, width=1.4 * SCALE))
             row = c.create_rectangle(312, yk - 8, 554, yk + 8, fill=BG, outline="")
             help_txt = (f"Cable {n} pin {pin}: current in this wire. Amber from {PIN_WARN_A:.0f} A. Over {PIN_MAX_A:.0f} A "
-                        f"twice (or once over {PIN_HARD_A:.0f} A) closes GPU programs.")
+                        f"twice (or once over {PIN_HARD_A:.0f} A) closes GPU programs. Notch above the bar = today's peak.")
             c.create_text(314, yk, text=f"P{pin}", fill=S_ID, font=F(11, "mono_m"), anchor="w")
             c.create_rectangle(348, yk - 1.5, 486, yk + 1.5, fill=GRID, outline="")
             self.put(f"bar{n}_{k}", c.create_rectangle(348, yk - 4, 348, yk + 4, fill=BAR_OK, outline=""))
+            # today's peak: a notch above the bar (max-hold), so a short spike stays visible after it passes
+            self.put(f"pk{n}_{k}", c.create_line(348, yk - 7, 348, yk - 3, fill=TXT2, width=2 * SCALE, state="hidden"))
             lim = 348 + 138 * PIN_MAX_A / 10
             c.create_line(lim, yk - 6, lim, yk + 6, fill=BAD, width=1.5 * SCALE)
             self.text(f"val{n}_{k}", 550, yk, "", S_VAL, 13, "mono_m", "e")
@@ -1717,6 +1721,12 @@ class App:
                 self.move(f"bar{n}_{k}", (348, yk - 4, 348 + 138 * min(a, 10) / 10, yk + 4))
                 self.set(f"bar{n}_{k}", fill=BAR_OK if col == TXT2 else col)
                 self.set(f"val{n}_{k}", text=f"{a:.2f}", fill=live)
+                pk = self.day_stats["pin_peak"].get((n, _pin))
+                if pk is not None:
+                    px = 348 + 138 * min(pk, 10) / 10
+                    self.move(f"pk{n}_{k}", (px, yk - 7, px, yk - 3))
+                    pcol = level(pk, PIN_WARN_A, PIN_MAX_A)
+                    self.set(f"pk{n}_{k}", fill=TXT2 if pcol == TXT2 else pcol, state="normal")
             if vals and n in getattr(self, "spread_y", {}):
                 amps = [a for _, a in vals]
                 lo, hi, avg, sy = min(amps), max(amps), sum(amps) / len(amps), self.spread_y[n]
