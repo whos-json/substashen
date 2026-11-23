@@ -1295,7 +1295,7 @@ class App:
         """(issue text or None, button label or None, [(segment, status colour, text)])."""
         if readings is None:
             return ("MSI Afterburner isn't running. Start it to restore protection.", "START AFTERBURNER",
-                    [("AFTERBURNER", BAD, "DOWN"), ("GPU", DIM, "-"), ("PINS", DIM, "-"), ("PSU 12V", DIM, "-"),
+                    [("AFTERBURNER", BAD, "DOWN"), ("GPUS", DIM, "-"), ("PIN SENSORS", DIM, "-"), ("12V READING", DIM, "-"),
                      ("PSU USB", DIM, "-")])
         ngpu = len({GPU_RE.search(s).group(1) for s, *_ in readings if GPU_RE.search(s)})
         npin = sum(1 for s, l, v, u in readings if s == "MSI PSU" and u == "A" and PIN_RE.search(l))
@@ -1303,9 +1303,9 @@ class App:
         stale = age > STALE_S
         # "LIVE" stays put while data is fresh, so this text doesn't force a repaint every second
         segs = [("AFTERBURNER", WARN if stale else OK, "LIVE" if age < 2 else f"\u0394t {age:.0f} s"),
-                ("GPU", OK if ngpu >= 2 else WARN, f"{ngpu}/2"),
-                ("PINS", OK if npin == 12 else BAD if npin == 0 else WARN, f"{npin}/12"),
-                ("PSU 12V", OK if has12 else WARN, "OK" if has12 else "MISSING"),
+                ("GPUS", OK if ngpu >= 2 else WARN, f"{ngpu}/2"),
+                ("PIN SENSORS", OK if npin == 12 else BAD if npin == 0 else WARN, f"{npin}/12"),
+                ("12V READING", OK if has12 else WARN, "OK" if has12 else "MISSING"),
                 ("PSU USB", DIM if self.usb_ok is None else OK if self.usb_ok else WARN,
                  "..." if self.usb_ok is None else "OK" if self.usb_ok else "NO REPLY")]
         if stale:
@@ -1349,11 +1349,11 @@ class App:
         c.create_line(0, HEAD_H, W, HEAD_H, fill=LINE)
         self.tip(c.create_text(14, HEAD_H / 2, text=APP.upper(), fill=TXT, font=F(14, "mono_b"), anchor="w"),
                  "Keys: T test  D data  M minimize  C size (full/standard/compact)  N night  O see-through.  Double-click header: size.")
-        self.tip(c.create_text(150, HEAD_H / 2, text="WORST PIN", fill=SUB, font=F(11, "cond_b"), anchor="w"),
+        self.tip(c.create_text(150, HEAD_H / 2, text="HIGHEST PIN", fill=SUB, font=F(11, "cond_b"), anchor="w"),
                  "The highest of the 12 pin currents right now, and how close it is to the 8 A limit.")
-        self.tip(self.text("worst", 222, HEAD_H / 2, "", S_VAL, 19, "mono_b"),
+        self.tip(self.text("worst", 236, HEAD_H / 2, "", S_VAL, 19, "mono_b"),
                  "The highest of the 12 pin currents right now, and how close it is to the 8 A limit.")
-        self.text("worst_sub", 318, HEAD_H / 2, "", SUB, 12)
+        self.text("worst_sub", 336, HEAD_H / 2, "", SUB, 12)
         x = W - 14
         if time.time() < self.confirm_until:  # in-panel confirmation instead of a system dialog
             x = button(c, x, HEAD_H / 2, "KEEP RUNNING", self.cancel_quit, fg=TXT)
@@ -1380,13 +1380,13 @@ class App:
         self.tip(c.create_text(14, ly, text="LINK", fill=DIM, font=F(10, "cond_b"), anchor="w"),
                  "Data links: Afterburner freshness, GPUs seen, pin sensors, PSU 12 V reading, PSU USB.")
         x = 52
-        for i, label in enumerate(("AFTERBURNER", "GPU", "PINS", "PSU 12V", "PSU USB")):
+        for i, label in enumerate(("AFTERBURNER", "GPUS", "PIN SENSORS", "12V READING", "PSU USB")):
             self.put(f"seg{i}_sq", c.create_rectangle(x, ly - 4, x + 8, ly + 4, fill=DIM, outline=""))
             self.tip(self.items[f"seg{i}_sq"], LINK_HELP[i])
             self.text(f"segl{i}", x + 13, ly, label, SUB, 11, "cond_b")
             # generous gap: at small zooms rounded font sizes render wider than the measure suggests
             self.text(f"seg{i}", x + 13 + font(11, "cond_b").measure(label) / SCALE + 12, ly, "", TXT2, 11)
-            x += 150 if i == 0 else 100
+            x += font(11, "cond_b").measure(label) / SCALE + 72  # even gaps whatever the label length
         bx = W - 14
         bw = font(10, "mono_m").measure("START AFTERBURNER") / SCALE + 16
         self.put("fix_btn", c.create_rectangle(bx - bw, ly - 9, bx, ly + 9, fill=WARN, outline=""))
@@ -1424,7 +1424,7 @@ class App:
 
     def build_diagram(self):
         c = self.c
-        section(c, 0, DIAG_Y, W, "01", "One-line  +12V distribution")
+        section(c, 0, DIAG_Y, W, "01", "Power path  PSU → cables → GPUs")
         x = W - 14  # colour legend, right-aligned: what the pin colours mean
         for label, col in ((f"> {PIN_MAX_A:.0f} A LIMIT", BAD), (f"\u2265 {PIN_WARN_A:.0f} A CAUTION", WARN), ("NORMAL", S_VAL)):
             c.create_text(x, DIAG_Y + 16, text=label, fill=SUB, font=F(11, "cond_b"), anchor="e")
@@ -1437,21 +1437,22 @@ class App:
                  "The power supply's own live readings (Afterburner's MSI PSU plugin).")
         c.create_text(px0 + 10, py0 + 16, text="PSU1", fill=S_ID, font=F(13, "mono_b"), anchor="w")
         c.create_text(px0 + 10, py0 + 34, text="MPG AI1300TS", fill=S_NAME, font=F(11, "mono_m"), anchor="w")
-        for k, lab in enumerate(("POWER OUT", "EFFICIENCY", "TEMP", "FAN")):
-            y = py0 + 78 + k * 58
-            c.create_text(px0 + 10, y - 12, text=lab, fill=S_LBL, font=F(11), anchor="w")
-            self.text(f"psu{k}", px1 - 10, y + 10, "", S_VAL, 19, "mono_m", "e")
-        bus_x, bus_y0, bus_y1 = 232, DIAG_Y + 52, DIAG_Y + 340
+        for k, lab in enumerate(("OUTPUT", "EFFICIENCY", "TEMPERATURE", "FAN")):
+            y = py0 + 84 + k * 60
+            c.create_line(px0 + 10, y - 30, px1 - 10, y - 30, fill=GRID)
+            c.create_text(px0 + 12, y, text=lab, fill=S_LBL, font=F(11), anchor="w")
+            self.text(f"psu{k}", px1 - 12, y, "", S_VAL, 18, "mono_m", "e")
+        bus_x, bus_y0, bus_y1 = 232, DIAG_Y + 52, DIAG_Y + 312
         c.create_line(px1, DIAG_Y + 194, bus_x, DIAG_Y + 194, fill=S_BUS, width=2 * SCALE)
         self.tip(c.create_line(bus_x, bus_y0, bus_x, bus_y1, fill=S_BUS, width=6 * SCALE),
                  "PSU +12V output. Must stay 11.6-12.6 V; outside that for 3 s raises a warning.")
-        c.create_text(bus_x + 10, bus_y0 - 8, text="B12", fill=S_ID, font=F(13, "mono_b"), anchor="w")
-        c.create_text(bus_x + 52, bus_y0 - 8, text="U", fill=S_LBL, font=F(12), anchor="w")
-        self.text("bus_u", bus_x + 68, bus_y0 - 8, "", S_VAL, 15, "mono_m")
-        # 12 V window under the bus: allowed band, limits ticked, live marker
-        rx0, rx1, ry = bus_x + 12, bus_x + 168, bus_y1 + 4
+        by = bus_y0 - 10
+        c.create_text(bus_x + 12, by, text="+12V BUS", fill=S_ID, font=F(12, "mono_b"), anchor="w")
+        self.text("bus_u", bus_x + 96, by, "", S_VAL, 15, "mono_m")
+        # the allowed range, beside the reading: band, limit ticks, live marker
+        rx0, rx1, ry = bus_x + 200, bus_x + 330, by - 1
         sx = lambda v: rx0 + (min(max(v, 11.3), 12.9) - 11.3) / 1.6 * (rx1 - rx0)
-        c.create_text(rx0, ry - 14, text="U WINDOW 11.6-12.6 V", fill=SUB, font=F(10, "cond_b"), anchor="w")
+        c.create_text(rx1 + 12, by, text="safe 11.6–12.6 V", fill=SUB, font=F(11, "cond"), anchor="w")
         self.rail_y = ry
         c.create_rectangle(rx0, ry, rx1, ry + 3, fill=GRID, outline="")
         c.create_rectangle(sx(V_MIN), ry, sx(V_MAX), ry + 3, fill="#2a3036", outline="")
@@ -1467,8 +1468,7 @@ class App:
         c.create_line(bus_x, yf, 256, yf, fill=S_BUS, width=2 * SCALE)
         self.put(f"brk{n}", c.create_rectangle(256, yf - 8, 272, yf + 8, fill=BAD, outline=S_BUS))
         self.tip(self.items[f"brk{n}"], f"Cable {n}. Flashes red if the PSU's own Safeguard+ flags this cable.")
-        c.create_text(264, yf - 22, text=f"F{n}", fill=S_ID, font=F(13, "mono_b"))
-        c.create_text(264, yf + 23, text=f"CBL{n}", fill=S_NAME, font=F(11, "mono_m"))
+        c.create_text(264, yf - 24, text=f"CABLE {n}", fill=S_ID, font=F(11, "mono_b"))
         c.create_line(272, yf, 292, yf, fill=S_BUS, width=2 * SCALE)
         vals = self.pins.get(n, [])
         for k, (pin, _a) in enumerate(vals):
@@ -1489,10 +1489,8 @@ class App:
                     c.create_text(348 + 138 * amps / 10, yk + 15, text=f"{amps} A" if amps == 10 else str(amps),
                                   fill=BAD if amps == 8 else DIM, font=F(11))
         c.create_line(572, yf, 650, yf, fill=S_BUS, width=2 * SCALE)
-        c.create_text(582, yf - 15, text="I", fill=S_LBL, font=F(12), anchor="w")
-        self.text(f"fi{n}", 594, yf - 15, "", S_VAL, 13, "mono_m")
-        c.create_text(582, yf + 15, text="P", fill=S_LBL, font=F(12), anchor="w")
-        self.text(f"fp{n}", 594, yf + 15, "", S_VAL, 13, "mono_m")
+        self.text(f"fi{n}", 588, yf - 15, "", S_VAL, 13, "mono_m")  # cable total current, above the line
+        self.text(f"fp{n}", 588, yf + 15, "", S_VAL, 13, "mono_m")  # and the watts it carries, below
         self.tip([self.items[f"fi{n}"], self.items[f"fp{n}"]], f"Cable {n} total: current and watts delivered to the card.")
         # the load: the card this cable feeds
         g = self.cable_map.get(n)
@@ -1507,11 +1505,11 @@ class App:
         self.fan_specs += [((g, i), *spec) for i, spec in enumerate(specs)]
         gx = 860
         self.tip(c.create_text(gx, yf - 56, text=f"GPU{g}", fill=S_ID, font=F(14, "mono_b"), anchor="w"),
-                 f"GPU{g}: LIMIT = what is capping its clock (normal under load). Clocks, load and VRAM are in DATA.")
+                 f"GPU{g}: CAPPED BY = what is limiting its clock speed right now (normal). Clocks, load and VRAM are in DATA.")
         # card model above its drawing; the cards don't report a model name, so settings.json "gpu_models" can set it
         model = (self.settings.get("gpu_models") or {}).get(brand) or f"{brand} GeForce RTX 5080"
         c.create_text(752, yf - 48, text=model.upper(), fill=S_NAME, font=F(11, "mono_m"))
-        for r, (l1, l2) in enumerate((("TEMP", "POWER"), ("FANS", "LIMIT"))):
+        for r, (l1, l2) in enumerate((("TEMPERATURE", "POWER"), ("FANS", "CAPPED BY"))):
             y = yf - 22 + r * 46
             c.create_text(gx, y - 12, text=l1, fill=S_LBL, font=F(11), anchor="w")
             self.text(f"g{g}_{r}a", gx, y + 9, "", S_VAL, 18, "mono_m")
@@ -1525,8 +1523,8 @@ class App:
         c.create_line(0, y0, W, y0, fill=LINE)
         c.create_line(746, y0, 746, H, fill=LINE)
         # trends, 90 s, each auto-scaled to a round full-scale so idle and load are both readable
-        section(c, 0, y0, 746, "02", "Trend  last 90 s")
-        rows = [("worst", "WORST PIN", "A")] + [(g, f"GPU{g} POWER", "W") for g in sorted(self.gpus)[:2]]
+        section(c, 0, y0, 746, "02", "Last 90 seconds")
+        rows = [("worst", "HIGHEST PIN", "A")] + [(g, f"GPU{g} POWER", "W") for g in sorted(self.gpus)[:2]]
         for i, (key, label, unit) in enumerate(rows):
             ty0, ty1 = y0 + 40 + i * 52, y0 + 78 + i * 52
             tx0, tx1 = 14, 746 - 52
@@ -1542,13 +1540,13 @@ class App:
             self.trace_box[key] = (tx0, tx1, ty0, ty1, unit)
         # energy
         section(c, 746, y0, W, "03", "Energy", "PSU USB + MSI CENTER", DIM)
-        for k, lab in enumerate(("PSU UPTIME", "LIFETIME", "TOTAL kWh")):
+        for k, lab in enumerate(("PSU ON FOR", "PSU LIFETIME", "TOTAL ENERGY")):
             c.create_text(760, y0 + 42 + k * 50, text=lab, fill=S_LBL, font=F(11), anchor="w")
             self.text(f"en{k}", 760, y0 + 62 + k * 50, "", S_VAL, 16, "mono_m")
         today = datetime.date.today()
         self.days = [today - datetime.timedelta(d) for d in range(6, -1, -1)]
         bx0, bx1 = 900, W - 14
-        c.create_text(bx0, y0 + 40, text="kWh / DAY", fill=SUB, font=F(10, "cond_b"), anchor="w")
+        c.create_text(bx0, y0 + 40, text="ENERGY PER DAY (kWh)", fill=SUB, font=F(10, "cond_b"), anchor="w")
         bw = (bx1 - bx0) / 7
         self.ebox = (bx0, bw, y0 + 60, H - 26)  # headroom: the tallest bar's value clears the caption
         c.create_line(bx0, H - 26, bx1, H - 26, fill=LINE)
@@ -1577,7 +1575,7 @@ class App:
         ab = f"{gaps[len(gaps) // 2]:.1f} s" if gaps else "-"  # median gap: robust to one late sample
         # the green squares already say "all reporting"; this line only adds rates and time, so it fits the row
         self.link_idle = (("DEMO  ·  " if DEMO else "") +
-                          f"updates {ab}  ·  checks 1 s  ·  PSU {PSU_POLL_S} s  ·  {time.strftime('%H:%M')}")
+                          f"readings every {ab}  ·  checked every 1 s  ·  {time.strftime('%H:%M')}")
         issue, fix, segs = self.link_state(readings, age)
         if self.error:
             issue, fix = f"Internal error: {self.error[:70]}. Details in substashen.log.", None
@@ -1587,7 +1585,7 @@ class App:
         for i, (label, col, val) in enumerate(segs):
             shown = "normal" if not calm or i == 0 else "hidden"
             self.set(f"seg{i}_sq", fill=col, state=shown)
-            self.set(f"segl{i}", text="ALL LINKS OK" if calm else label, fill=SUB, state=shown)
+            self.set(f"segl{i}", text="ALL SENSORS OK" if calm else label, fill=SUB, state=shown)
             self.set(f"seg{i}", text=val, fill=col if col != OK else TXT2, state="hidden" if calm else "normal")
         self.link_now = (issue, fix)
         self.show_issue()
@@ -1677,7 +1675,7 @@ class App:
             self.set("en0", text="reading..." if self.usb_ok is None else "no USB reply", fill=SUB)
             self.set("en1", text="-", fill=SUB)
         kwh = self.record.get("kwh_total")
-        self.set("en2", text=f"{kwh:,.1f}" if kwh is not None and math.isfinite(kwh) else "no MSI record")
+        self.set("en2", text=f"{kwh:,.1f} kWh" if kwh is not None and math.isfinite(kwh) else "no MSI record")
         daily = self.record.get("daily", {})
         kw = [daily.get(d, 0.0) for d in self.days]
         bx0, bw, bt, bb = self.ebox
@@ -1702,9 +1700,9 @@ class App:
             self.anim_t = time.time()
             self.animate()
         temp, power, used = v.get("GPU Temperature"), v.get("GPU Power"), v.get("GPU Memory Allocated")
-        codes = [code for lim, code in zip(LIMITS, ("PWR", "TMP", "VOLT", "IDLE", "SLI"))
+        codes = [word for lim, word in zip(LIMITS, ("power", "heat", "voltage", "idle", "sync"))
                  if any(lab.lower().endswith(lim) and val for lab, val in v.items())]
-        limiter = "+".join(codes[:2]) + ("+" if len(codes) > 2 else "") or "none"
+        limiter = (codes[0] + (" +" if len(codes) > 1 else "")) if codes else "nothing"  # plain word, fits the cell
         V = getattr(self, "vcol", S_VAL)
         tcol, pcol = level(temp or 0, 75, 85), level(power or 0, GPU_TDP_W * 0.9, GPU_TDP_W)
         self.set(f"g{g}_0a", text=f"{num(temp)} \u00b0C", fill=V if tcol == TXT2 else tcol)

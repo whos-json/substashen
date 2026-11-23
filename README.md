@@ -46,12 +46,12 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
 
 ## The panel
 
-- **WORST PIN**: the highest of the 12 currents and how close it is to the limit, at a glance.
-- **One-line diagram**: PSU → +12 V bus → two cable feeders → six pin conductors each → the card they feed.
+- **HIGHEST PIN**: the highest of the 12 currents and how close it is to the 8 A limit, at a glance.
+- **Power path diagram**: PSU → +12 V bus (with its safe 11.6–12.6 V range) → cable 1 and cable 2 → six pins each → the card they feed.
   Each pin has its live value and a bar against the 8 A limit. The cable-to-card match is worked out
   automatically from watts.
-- **Line drawings of each card** with fans that turn at their real speed.
-- **LINK row**: shows *ALL LINKS OK*, or exactly which data source is missing and a button to fix it.
+- **Line drawings of each card** with fans that turn at their real speed, plus temperature, power, fans and what is capping its clock (*CAPPED BY: voltage / power / heat*, which is normal).
+- **LINK row**: shows *ALL SENSORS OK*, or exactly which data source is missing and a button to fix it.
 - **Trends**: worst pin and each GPU's power over 90 s, auto-scaled.
 - **Energy**: PSU uptime and lifetime hours read from the PSU over USB, plus kWh from MSI Center's record.
 - **Hover anything** for a plain-English explanation.
