@@ -1107,9 +1107,22 @@ class App:
         self.confirm_until = 0
         self.render(self.last_frame)
 
-    def quit(self):
+    def relaunch(self):
+        """Start a fresh copy, then exit. The new copy waits for this process to end before it takes over."""
+        exe = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        args = [a for a in sys.argv[1:] if a.startswith("--demo")]
+        try:
+            subprocess.Popen([exe if os.path.exists(exe) else sys.executable, os.path.abspath(__file__),
+                              "--after", str(os.getpid())] + args, cwd=os.path.dirname(os.path.abspath(__file__)),
+                             creationflags=0x00000008, close_fds=True)  # DETACHED_PROCESS
+        except OSError as e:  # couldn't start the new copy: keep this one running rather than leave nothing
+            log(f"relaunch failed: {e}")
+            return
+        self.quit("relaunch")
+
+    def quit(self, why="closed by the user"):
         self.write_day("DAY-SO-FAR")
-        self.event("STOP", "closed by the user")
+        self.event("STOP", why)
         if not DEMO:
             self.remember_pos()
         alarm_stop()
@@ -1481,9 +1494,11 @@ class App:
             x = button(c, x - 6, HEAD_H / 2, "DATA", self.toggle_table,
                        hover=lambda i: self.tip(i, "Show or hide every raw reading as a table."))
             x = button(c, x - 6, HEAD_H / 2, "TEST", self.test_alert,
-                       hover=lambda i: self.tip(i, "Ring the alarm and show the alert screen. Nothing is closed.")) - 18
+                       hover=lambda i: self.tip(i, "Ring the alarm and show the alert screen. Nothing is closed."))
+            x = button(c, x - 6, HEAD_H / 2, "RELAUNCH", self.relaunch,
+                       hover=lambda i: self.tip(i, "Close and reopen Substashen (e.g. after an update). "
+                                                   "Protection pauses for a few seconds.")) - 18
         sq = x - font(12, "mono_b").measure("NOT PROTECTED") / SCALE - 18  # room for the longest state
-        self.col_x = sq + 18  # the GPU readout column starts on the same line as the state text
         c.create_line(sq - 16, HEAD_H / 2 - 10, sq - 16, HEAD_H / 2 + 10, fill=LINE)
         self.put("status_sq", c.create_rectangle(sq, HEAD_H / 2 - 5, sq + 10, HEAD_H / 2 + 5, fill=OK, outline=""))
         self.tip(self.text("status", sq + 18, HEAD_H / 2, "", OK, 12, "mono_b", "w"),
@@ -1631,7 +1646,7 @@ class App:
         specs = draw_gpu_art(c, 664, yf - 34, 176, 68, "msi" if brand == "MSI" else "dell",
                              [self.fan_angle[(g, i)] for i in range(3)])
         self.fan_specs += [((g, i), *spec) for i, spec in enumerate(specs)]
-        gx = getattr(self, "col_x", 860)
+        gx = 858
         self.tip(c.create_text(gx, yf - 52, text=f"GPU{g}", fill=S_ID, font=F(14, "mono_b"), anchor="w"),
                  f"GPU{g}: MEM TEMP = its GDDR7 memory, amber from {MEM_WARN_C} °C. RTX 50 cards no longer report a "
                  f"hotspot. Clocks and every other reading are in DATA.")
@@ -2229,6 +2244,15 @@ if __name__ == "__main__":
         DEMO_FAULT = "--demo-fault" in sys.argv
         DEMO = DEMO_FAULT or "--demo" in sys.argv
         try:
+            if "--after" in sys.argv:  # relaunched: let the old copy exit and release the single-instance lock
+                k = ctypes.WinDLL("kernel32")
+                k.OpenProcess.restype = ctypes.c_void_p
+                k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+                k.CloseHandle.argtypes = [ctypes.c_void_p]
+                old = k.OpenProcess(0x00100000, False, int(sys.argv[sys.argv.index("--after") + 1]))  # SYNCHRONIZE
+                if old:
+                    k.WaitForSingleObject(old, 15000)
+                    k.CloseHandle(old)
             if DEMO or single_instance():
                 incident("START", f"pid {os.getpid()}")
                 App().root.mainloop()

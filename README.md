@@ -106,6 +106,7 @@ pythonw substashen.pyw
 | Key / action | Does |
 |---|---|
 | **TEST** button / `T` | Rings the alarm and shows the alert screen; nothing is closed |
+| **RELAUNCH** button | Closes and reopens Substashen (e.g. after updating it); protection pauses for a few seconds |
 | `C` or double-click the header | Switches between the **Full** and **Standard** view |
 | `D` / **DATA** | Every raw reading, plus the latest events |
 | `M` / **–** | Minimize to the taskbar (protection keeps running) |
