@@ -52,7 +52,7 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
   Each pin has its live value, a bar against the 8 A limit and a notch marking today's peak, so a short
   spike stays visible after it has passed. The cable-to-card match is worked out
   automatically from watts.
-- **Line drawings of each card** with fans that turn at their real speed, plus temperature (with today's maximum), GDDR7 memory temperature, load, power, fans and VRAM in use. (RTX 50 cards no longer report a hotspot temperature.)
+- **Line drawings of each card** with fans that turn at their real speed, plus GPU and GDDR7 memory temperature (each with today's maximum), load, power, fans and VRAM in use. (RTX 50 cards no longer report a hotspot temperature.)
 - **Afterburner settings under each card**: the power limit, core and memory clock offsets and temperature limit Afterburner has applied, read-only from its control memory. *n/a* means the card doesn't expose that setting.
 - **LINK row**: shows *ALL SENSORS OK*, or exactly which data source is missing and a button to fix it.
 - **Last 90 seconds**: the highest pin and each GPU's power over 90 s, auto-scaled.
@@ -110,7 +110,7 @@ pythonw substashen.pyw
 | `C` or double-click the header | Switches between the **Full** and **Standard** view |
 | `D` / **DATA** | Every raw reading, plus the latest events |
 | `M` / **–** | Minimize to the taskbar (protection keeps running) |
-| `N` | Night dimming on/off (automatic 23:00–07:00) |
+| `N` | Night dimming on/off |
 | `O` | Slightly see-through when the mouse isn't over it |
 | Drag | Move it; the corner grip resizes. Position and size are remembered. |
 
@@ -121,7 +121,7 @@ Keys work after you click the panel once.
 | Key | Default | Meaning |
 |---|---|---|
 | `power_cap_w` | `270` | Your GPU power limit; the power-cap warning triggers 20 W above it |
-| `night_hours` | `[23, 7]` | When night dimming is on |
+| `night_hours` | off | Optional automatic night dimming, e.g. `[23, 7]` |
 | `gpu_models` | — | Names shown above each card, e.g. `{"MSI": "MSI RTX 5080 VENTUS 3X OC"}` |
 | `view`, `zoom`, `pos` | — | Saved automatically |
 

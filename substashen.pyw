@@ -912,7 +912,7 @@ LOW_Y, LOW_H = DIAG_Y + DIAG_H, 196        # rails / trends / energy
 H = LOW_Y + LOW_H
 FEEDER_Y = {"1": DIAG_Y + 116, "2": DIAG_Y + 272}
 MEM_WARN_C, MEM_MAX_C = 90, 100  # GDDR7: amber from 90 degC, red from 100 (it throttles around 105)
-GPU_COLS = (0, 112, 194)  # sized for the widest values: "1,622 rpm", "12.5 GB", "voltage"  # x offsets of the three GPU readout columns from the GPU title
+GPU_COLS = (0, 104, 200)  # x offsets of the three GPU readout columns; fits "1,622 rpm" and "MEMORY max 55"
 AB_EXE = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "MSI Afterburner", "MSIAfterburner.exe")
 # SCADA one-line conventions: yellow busbars, cyan equipment IDs, magenta names, muted-red measurement labels,
 # green values. A real alarm is bright red (BAD), so it never blends with the labels.
@@ -1450,9 +1450,9 @@ class App:
         self.update(readings, faults, age)
 
     def night_now(self):
-        start, end = self.settings.get("night_hours", [23, 7])
+        hours = self.settings.get("night_hours")  # off unless set, e.g. [23, 7]; N still toggles it by hand
         h = datetime.datetime.now().hour
-        auto = (h >= start or h < end) if start > end else start <= h < end
+        auto = bool(hours) and ((h >= hours[0] or h < hours[1]) if hours[0] > hours[1] else hours[0] <= h < hours[1])
         self.night = auto if self.night_force is None else self.night_force
         return self.night
 
@@ -1648,17 +1648,19 @@ class App:
         self.fan_specs += [((g, i), *spec) for i, spec in enumerate(specs)]
         gx = 858
         self.tip(c.create_text(gx, yf - 52, text=f"GPU{g}", fill=S_ID, font=F(14, "mono_b"), anchor="w"),
-                 f"GPU{g}: MEM TEMP = its GDDR7 memory, amber from {MEM_WARN_C} °C. RTX 50 cards no longer report a "
+                 f"GPU{g}: MEMORY = its GDDR7 memory temperature, amber from {MEM_WARN_C} °C. RTX 50 cards no longer report a "
                  f"hotspot. Clocks and every other reading are in DATA.")
         # card model above its drawing; the cards don't report a model name, so settings.json "gpu_models" can set it
         model = (self.settings.get("gpu_models") or {}).get(brand) or f"{brand} GeForce RTX 5080"
         c.create_text(752, yf - 52, text=model.upper(), fill=S_NAME, font=F(11, "mono_m"))
-        for r, labs in enumerate((("TEMP", "MEM TEMP", "POWER"), ("FANS", "VRAM", "LOAD"))):
+        for r, labs in enumerate((("TEMP", "MEMORY", "POWER"), ("FANS", "VRAM", "LOAD"))):
             y = yf - 22 + r * 46
             for col, (lab, dx) in enumerate(zip(labs, GPU_COLS)):
-                c.create_text(gx + dx, y - 12, text=lab, fill=S_LBL, font=F(11), anchor="w")
+                lab_i = c.create_text(gx + dx, y - 12, text=lab, fill=S_LBL, font=F(11), anchor="w")
                 self.text(f"g{g}_{r}{'abc'[col]}", gx + dx, y + 9, "", S_VAL, 16, "mono_m")
-        self.text(f"g{g}_tmax", gx + 40, yf - 34, "", DIM, 11)  # today's highest, in the label row beside TEMP
+                if r == 0 and col < 2:  # today's highest temperature, right after the TEMP / MEM TEMP label
+                    lx = gx + dx + (c.bbox(lab_i)[2] - c.bbox(lab_i)[0]) / SCALE + 7  # text is in pixels already
+                    self.text(f"g{g}_max{col}", lx, y - 12, "", DIM, 11)
         # what Afterburner has applied: one quiet line under the drawing and the readouts. Placed by place_oc().
         for k, lab in enumerate(("POWER", "CORE", "MEM", "TEMP LIMIT")):
             self.put(f"g{g}_ocl{k}", c.create_text(664, yf + 68, text=lab, fill=SUB, font=F(11, "cond"), anchor="w"))
@@ -1913,7 +1915,10 @@ class App:
         tmax = self.day_stats.setdefault("gpu_tmax", {})
         if temp is not None:
             tmax[g] = max(tmax.get(g, temp), temp)
-        self.set(f"g{g}_tmax", text=f"max {tmax[g]:.0f} °C" if g in tmax else "")
+        self.set(f"g{g}_max0", text=f"max {tmax[g]:.0f}" if g in tmax else "")
+        if mt is not None:
+            tmax["m" + g] = max(tmax.get("m" + g, mt), mt)
+        self.set(f"g{g}_max1", text=f"max {tmax['m' + g]:.0f}" if "m" + g in tmax else "")
         oc = self.oc.get(g)
         sign = lambda x: f"{x:+d}".replace("-", "−")
         cells = (("-" if not oc else "n/a" if oc["power"] is None else f"{oc['power']}%"),
