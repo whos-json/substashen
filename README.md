@@ -52,6 +52,7 @@ The warning rules only warn. Only the 8 A rule and the PSU alarm close programs.
   Each pin has its live value and a bar against the 8 A limit. The cable-to-card match is worked out
   automatically from watts.
 - **Line drawings of each card** with fans that turn at their real speed, plus temperature, power, fans and what is capping its clock (*CAPPED BY: voltage / power / heat*, which is normal).
+- **Afterburner settings under each card**: the power limit (% and watts), core and memory clock offsets and temperature limit Afterburner has applied, read-only from its control memory. *n/a* means the card doesn't expose that setting.
 - **LINK row**: shows *ALL SENSORS OK*, or exactly which data source is missing and a button to fix it.
 - **Last 90 seconds**: the highest pin and each GPU's power over 90 s, auto-scaled.
 - **Energy**: PSU uptime and lifetime hours read from the PSU over USB, plus kWh from MSI Center's record.
@@ -143,7 +144,7 @@ MSI Center profile file ── kWh history ────────────�
   `51 D0` / `51 D1`. The code refuses to build any other frame, so settings can never be written to the PSU.
   See [`PSU_PROTOCOL.md`](PSU_PROTOCOL.md) for the decoded protocol.
 - **Lightweight**: about 1% of one CPU core and about 40 MB of RAM. Drawing is retained, not
-  redrawn, and pauses while minimized.
+  redrawn region by region (Tk would otherwise repaint one box covering every change), and pauses while minimized.
 
 ## Testing
 

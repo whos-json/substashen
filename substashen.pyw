@@ -179,6 +179,44 @@ def normalise(entries, gpus):
     return out
 
 
+def read_oc():
+    """Afterburner's applied settings per NVIDIA card, {"0": {"power": %, "core": MHz, "mem": MHz, "temp": C}}.
+    Read-only view of its control memory (MACMSharedMemory, SDK v2.0); a field is None if the card doesn't expose it."""
+    if DEMO:
+        return {g: {"power": 75, "core": -502, "mem": 0, "temp": None} for g in ("0", "1")}
+    h = k32.OpenFileMappingW(4, False, "MACMSharedMemory")  # FILE_MAP_READ: this view can never write a setting
+    if not h:
+        return {}
+    view = k32.MapViewOfFile(h, 4, 0, 0, 0)
+    try:
+        mbi = _MBI()
+        if not view or not k32.VirtualQuery(view, ctypes.byref(mbi), ctypes.sizeof(mbi)):
+            return {}
+        sig, _ver, hs, n, es = struct.unpack("<5I", ctypes.string_at(view, 20))
+        if sig != 0x4D41434D or es < 600 or n > 64 or hs + n * es > mbi.RegionSize:
+            return {}
+        m = ctypes.string_at(view + hs, n * es)
+    finally:
+        if view:
+            k32.UnmapViewOfFile(view)
+        k32.CloseHandle(h)
+    return parse_oc(m, n, es)
+
+
+def parse_oc(m, n, es):
+    out, nv = {}, 0
+    for j in range(n):
+        b = j * es
+        if "VEN_10DE" not in _s(m[b + es - 260:b + es]).upper():
+            continue  # numbered over NVIDIA cards only, the same way nvidia_cards() does
+        d = struct.unpack_from("<69i", m, b)  # DWORD/LONG fields of MACM_SHARED_MEMORY_GPU_ENTRY
+        fl = d[0] & 0xFFFFFFFF
+        out[str(nv)] = {"power": d[43] if fl & 0x400 else None, "core": round(d[47] / 1000) if fl & 0x800 else None,
+                        "mem": round(d[51] / 1000) if fl & 0x1000 else None, "temp": d[55] if fl & 0x2000 else None}
+        nv += 1
+    return out
+
+
 def demo_readings():
     t, r = time.time(), []
     for g, brand, base in ((0, "Dell", 62), (1, "MSI", 38)):
@@ -889,6 +927,7 @@ class App:
         self.show_table = False
         self.hist = collections.defaultdict(lambda: collections.deque(maxlen=90))
         self.runtime, self.record, self.usb_ok, self.usb_thread, self.last_usb = None, {}, None, None, 0.0
+        self.oc, self.oc_at = {}, 0.0  # Afterburner's applied clocks/limits, re-read every 5 s
         self.pins, self.psu, self.gpus, self.popup, self.popup_sev, self.popup_items = {}, {}, {}, None, 0, []
         self.snooze_until, self.snooze_sev = 0, 0
         self.streak, self.arrivals = collections.Counter(), collections.deque(maxlen=11)
@@ -1096,6 +1135,8 @@ class App:
             self.offline_alerted = True
         if readings is not None:
             self.collect(readings)
+            if now - self.oc_at >= 5:
+                self.oc, self.oc_at = read_oc(), now
         self.last_frame = (readings, faults, age)
         if self.visible():  # hidden behind an alert or minimized: skip the drawing work
             self.render(self.last_frame)
@@ -1539,6 +1580,14 @@ class App:
             self.text(f"g{g}_{r}a", gx, y + 9, "", S_VAL, 18, "mono_m")
             c.create_text(gx + 132, y - 12, text=l2, fill=S_LBL, font=F(11), anchor="w")
             self.text(f"g{g}_{r}b", gx + 132, y + 9, "", S_VAL, 18, "mono_m")
+        # what Afterburner has applied to this card, under its live readings
+        ox = 664  # spans under the drawing and the readouts: the panel has no room for four cells beside it
+        c.create_line(ox, yf + 47, W - 14, yf + 47, fill=GRID)
+        for k, lab in enumerate(("POWER LIMIT", "CORE OFFSET", "MEMORY OFFSET", "TEMP LIMIT")):
+            c.create_text(ox + k * 112, yf + 57, text=lab, fill=S_LBL, font=F(10), anchor="w")
+            self.tip(self.text(f"g{g}_oc{k}", ox + k * 112, yf + 73, "", S_VAL, 13, "mono_m"),
+                     f"GPU{g}: settings MSI Afterburner has applied (read only). Power limit is % of the card's "
+                     f"{GPU_TDP_W} W default; offsets are added to stock clocks; n/a = this card doesn't expose it.")
 
     def build_lower(self):
         c = self.c
@@ -1612,6 +1661,7 @@ class App:
             self.set(f"seg{i}", text=val, fill=col if col != OK else TXT2, state="hidden" if calm else "normal")
         self.link_now = (issue, fix)
         self.show_issue()
+        self.c.update_idletasks()  # repaint each region on its own: Tk merges all changes into one box
         if readings is None:
             self.set("worst", text="-", fill=DIM)
             self.set("worst_sub", text="no pin data")
@@ -1648,6 +1698,7 @@ class App:
             ry = self.rail_y
             self.move("u_mark", (mx - 4, ry - 5, mx + 4, ry - 5, mx, ry + 1))
             self.set("u_mark", fill=TXT if ok12 else BAD)
+        self.c.update_idletasks()
         blink = int(time.time()) % 2 == 0
         for n in FEEDER_Y:
             vals = self.pins.get(n, [])
@@ -1676,10 +1727,12 @@ class App:
                 self.set(f"spr{n}", fill=col)
                 self.move(f"sprm{n}", (x(avg), sy - 7, x(avg), sy + 7))
                 self.set(f"sprv{n}", text=f"{spread:.2f}", fill=V if col == "#5b636b" else WARN)
+            self.c.update_idletasks()
             g = self.cable_map.get(n)
             gpu = self.gpus.get(g)
             if gpu:
                 self.update_gpu(g, gpu["v"])
+                self.c.update_idletasks()
         if self.view != "full":  # trend and energy rows aren't drawn
             return
         # trends
@@ -1707,6 +1760,7 @@ class App:
             self.move(f"tip{g}", (pts[-2] - 2, pts[-1] - 2, pts[-2] + 2, pts[-1] + 2))
             for part in ("trace", "tip"):
                 self.set(f"{part}{g}", state="normal")
+        self.c.update_idletasks()
         # energy: PSU runtime counters (USB) + MSI Center's kWh record; nothing logged by Substashen
         if self.runtime:
             on, total, at = self.runtime
@@ -1751,6 +1805,14 @@ class App:
         self.set(f"g{g}_0b", text=f"{num(power)} W", fill=V if pcol == TXT2 else pcol)
         self.set(f"g{g}_1a", text=f"{num(max(rpm))} rpm" if any(rpm) else "stopped", fill=V)
         self.set(f"g{g}_1b", text=limiter, fill=V)
+        oc = self.oc.get(g)
+        sign = lambda x: f"{x:+d}".replace("-", "−")
+        cells = (("-" if not oc else "n/a" if oc["power"] is None else f"{oc['power']}% · {GPU_TDP_W * oc['power'] // 100} W"),
+                 ("-" if not oc else "n/a" if oc["core"] is None else f"{sign(oc['core'])} MHz"),
+                 ("-" if not oc else "n/a" if oc["mem"] is None else f"{sign(oc['mem'])} MHz"),
+                 ("-" if not oc else "n/a" if oc["temp"] is None else f"{oc['temp']} °C"))
+        for k, txt in enumerate(cells):
+            self.set(f"g{g}_oc{k}", text=txt, fill=V if txt not in ("-", "n/a") else DIM)
 
     def fill_table(self, readings):
         t = self.table
@@ -1990,6 +2052,14 @@ def selftest():
            ("GPU1 memory usage \\ process", "MB", 3.4e38, 0), ("CPU1 temperature", "\xb0C", 50.0, 0),
            ("GPU1 usage", "%", float("nan"), 0), ("GPU2 fan tachometer 2", "RPM", 900.0, 1),
            ("PSU 12VHPWR2_6 current", "A", 0.125, 0), ("PSU 12V voltage", "V", 12.094, 0), ("PSU 12VHPWR1 alarm", "", 0.0, 0)]
+    # Afterburner control memory: an AMD entry is skipped, unsupported fields read as None, kHz -> MHz
+    es = 3760
+    def entry(gid, flags, power, core_khz, mem_khz):
+        d = [0] * 69
+        d[0], d[43], d[47], d[51], d[55] = flags, power, core_khz, mem_khz, 83
+        return struct.pack("<69i", *d).ljust(es - 260, b"\0") + gid.encode().ljust(260, b"\0")
+    m = entry("VEN_1002&DEV_164E", 0, 0, 0, 0) + entry("VEN_10DE&DEV_2C02", 0x400 | 0x800 | 0x1000, 75, -502000, 1000000)
+    assert parse_oc(m, 2, es) == {"0": {"power": 75, "core": -502, "mem": 1000, "temp": None}}
     norm = normalise(raw, gpus)
     assert ("GPU [#0]: NVIDIA GeForce RTX 5080: Dell", "GPU Temperature", 38.0, "\xb0C") in norm
     assert ("GPU [#1]: NVIDIA GeForce RTX 5080: MSI", "GPU Power", 12.7, "W") in norm
