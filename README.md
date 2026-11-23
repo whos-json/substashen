@@ -143,8 +143,11 @@ MSI Center profile file ── kWh history ────────────�
 - **PSU uptime and lifetime** are read straight from the PSU over USB HID, using only the two read commands
   `51 D0` / `51 D1`. The code refuses to build any other frame, so settings can never be written to the PSU.
   See [`PSU_PROTOCOL.md`](PSU_PROTOCOL.md) for the decoded protocol.
-- **Lightweight**: about 1% of one CPU core and about 40 MB of RAM. Drawing is retained, not
-  redrawn region by region (Tk would otherwise repaint one box covering every change), and pauses while minimized.
+- **Afterburner settings** (power limit, clock offsets, temperature limit) come from Afterburner's
+  `MACMSharedMemory`, mapped read-only every 5 s, so Substashen can never change them.
+- **Lightweight**: about 0.5% of one CPU core at idle and about 30 MB of private memory. Drawing is
+  retained: only changed values are updated, each screen region is repainted on its own, and drawing
+  pauses while minimized.
 
 ## Testing
 
