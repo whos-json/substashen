@@ -24,9 +24,10 @@ def glyph(n):
     return im
 
 
-out = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "substashen.ico")
+root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+out = os.path.join(root, "substashen.ico")
 sizes = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 imgs = [glyph(s) for s in sizes]
 imgs[-1].save(out, format="ICO", sizes=[(s, s) for s in sizes], append_images=imgs[:-1])
-glyph(256).save(os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon_preview.png"))
+imgs[-1].save(os.path.join(root, "docs", "icon.png"))  # the README's icon
 print("wrote", out)

@@ -2,8 +2,8 @@
 # Task Manager > Startup apps, where it can be switched off. No admin needed. Re-running is safe.
 $ErrorActionPreference = 'Stop'
 $name   = 'Substashen'
-$dir    = $PSScriptRoot
-# Substashen.exe (launcher\) carries the name and icon Windows shows in the Startup list, then starts substashen.pyw.
+$dir    = Split-Path $PSScriptRoot  # the app folder; this script lives in its launcher\ subfolder
+# Substashen.exe (built by launcher\build.bat) carries the name and icon Windows shows in the Startup list, then starts substashen.pyw.
 $exe    = Join-Path $dir 'Substashen.exe'
 $run    = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $approved = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'

@@ -26,6 +26,7 @@ GPU_TDP_W = 360            # RTX 5080 default power limit (colour thresholds, to
 STALE_S, FROZEN_S, OFFLINE_ALERT_S, STARTUP_GRACE_S = 5, 8, 30, 120  # frozen: real pins jitter every second under load
 SNOOZE_S, KILL_EVERY_S, TRACE_EVERY_S = 60, 3, 3
 PIN_RE = re.compile(r"\bpin", re.I)
+def usable(val): return math.isfinite(val) and abs(val) <= 1e30  # NaN/inf, or FLT_MAX = Afterburner's "no data"
 GPU_RE = re.compile(r"GPU \[#(\d+)\]: NVIDIA")
 ALARM_TEXT = {1: "pin over its limit", 2: "pins out of balance", 3: "over 18 A"}  # PSU GPU Safeguard+ status codes
 SAFE_DIRS = (os.environ.get("SystemRoot", r"C:\Windows").lower().rstrip("\\") + "\\",)  # not C:\Windows.old
@@ -137,7 +138,7 @@ def read_afterburner():
     out = []
     for b, _raw, sensor, label, unit in _layout[1]:
         val = ctypes.c_float.from_address(view + b + 1300).value  # read just the value, in place
-        if math.isfinite(val) and abs(val) <= 1e30:  # NaN/inf, or FLT_MAX = Afterburner's "no data"
+        if usable(val):
             out.append((sensor, label, val, unit))
     return out, time.time() - t, t
 
@@ -166,17 +167,6 @@ def classify(name, unit, gpu, nv):
     if gpu in nv and name.startswith("GPU"):
         return nv[gpu], GPU_MAP.get(re.sub(r"^GPU\d*\s+", "", name).lower(), name), unit
     return None
-
-
-def normalise(entries, gpus):
-    """(name, unit, value, gpu index) entries -> panel readings; drops ignored sensors and "no data" values."""
-    nv = nvidia_cards(gpus)
-    out = []
-    for name, unit, val, gpu in entries:
-        meta = classify(name, unit, gpu, nv)
-        if meta and math.isfinite(val) and abs(val) <= 1e30:
-            out.append((meta[0], meta[1], val, meta[2]))
-    return out
 
 
 def read_oc():
@@ -757,20 +747,6 @@ def section(c, x0, y0, x1, code, title, right="", right_color=SUB):
         c.create_text(x1 - 14, y0 + 16, text=right, fill=right_color, font=F(11), anchor="e")
 
 
-def readout(c, x, y, label, value, unit="", size=12, color=TXT, label_w=None):
-    """LABEL  value unit, in one line (label_w set) or label above value."""
-    if label_w:
-        c.create_text(x, y, text=label.upper(), fill=DIM, font=F(10, "cond_b"), anchor="w")
-        t = c.create_text(x + label_w, y, text=value, fill=color, font=F(size), anchor="w")
-    else:
-        c.create_text(x, y, text=label.upper(), fill=DIM, font=F(10, "cond_b"), anchor="w")
-        t = c.create_text(x, y + size * 0.55 + 12, text=value, fill=color, font=F(size, "mono_m"), anchor="w")
-    if unit:
-        x2 = c.bbox(t)[2] / SCALE if SCALE == 1 else x + (label_w or 0) + font(size, "mono_m" if not label_w else "mono").measure(value) / SCALE
-        c.create_text(x2 + 3, (y if label_w else y + size * 0.55 + 12) + (0 if label_w else size * 0.12), text=unit,
-                      fill=SUB, font=F(max(10, size * 0.5)), anchor="w")
-
-
 def button(c, x1, y, text, cmd, fg=SUB, fill=PANEL, edge=LINE, size=10, hover=None):
     """Right-aligned rectangular text button; returns its left edge."""
     w = font(size, "mono_m").measure(text) / SCALE + 16
@@ -971,7 +947,7 @@ class App:
         on_screen = pos and any(x <= pos[0] < x + w - 50 and y <= pos[1] < y + h - 50 for x, y, w, h, _ in monitors())
         r.geometry(f"+{pos[0]}+{pos[1]}" if on_screen else
                    f"+{mx + max(0, round((mw - W * SCALE) / 2))}+{my + round(16 * SCALE)}")  # top of home monitor
-        # two sizes: full (everything) and standard (no trend/energy row); an old saved "compact" becomes standard
+        # two sizes: full (everything) and standard (no trend/energy row); anything else saved becomes standard
         self.view = self.settings.get("view") or "standard"
         self.view = self.view if self.view in VIEWS else "standard"
         self.night, self.night_force = False, None  # night dimming: N key toggles by hand
@@ -986,7 +962,7 @@ class App:
         c.bind("<B1-Motion>", self.drag)
         c.bind("<ButtonRelease-1>", self.release)
         c.bind("<Motion>", lambda e: c.config(cursor="size_nw_se" if self.in_grip(e) else ""))
-        c.bind("<Double-Button-1>", lambda e: self.toggle_compact() if e.y < HEAD_H * SCALE else None)
+        c.bind("<Double-Button-1>", lambda e: self.toggle_view() if e.y < HEAD_H * SCALE else None)
         c.bind("<Enter>", lambda e: r.attributes("-alpha", 1.0))
         c.bind("<Leave>", lambda e: r.attributes("-alpha", self.idle_alpha))
         r.bind("<Key>", self.on_key)  # keys work once the panel has been clicked (it takes focus on click)
@@ -1037,15 +1013,14 @@ class App:
         return LOW_Y if self.view == "standard" else H
 
     def on_key(self, e):
-        action = {"t": self.test_alert, "d": self.toggle_table, "m": self.minimize, "c": self.toggle_compact,
+        action = {"t": self.test_alert, "d": self.toggle_table, "m": self.minimize, "c": self.toggle_view,
                   "n": self.toggle_night, "o": self.toggle_opacity}.get(e.keysym.lower())
         if action:
             action()
 
-    def toggle_compact(self):  # C key / double-click header: full <-> standard
+    def toggle_view(self):  # C key / double-click header: full <-> standard
         self.view = VIEWS[(VIEWS.index(self.view) + 1) % len(VIEWS)]
         self.settings["view"] = self.view
-        self.settings.pop("compact", None)
         save_json(SETTINGS_FILE, self.settings)
         self.c.config(height=self.ph() * SCALE)
         self.sig = None
@@ -1081,7 +1056,7 @@ class App:
         if self.resizing:
             self.resizing = False
             self.apply_zoom()
-        self.remember_pos()
+        self.remember_pos(force=False)
 
     def apply_zoom(self):
         global SCALE
@@ -1095,9 +1070,11 @@ class App:
         self.sig = None  # full rebuild at the new size
         self.render(self.last_frame)
 
-    def remember_pos(self):
-        self.settings["pos"] = [self.root.winfo_x(), self.root.winfo_y()]
-        self.settings["zoom"] = round(self.zoom, 3)
+    def remember_pos(self, force=True):
+        pos, zoom = [self.root.winfo_x(), self.root.winfo_y()], round(self.zoom, 3)
+        if not force and self.settings.get("pos") == pos and self.settings.get("zoom") == zoom:
+            return  # a plain click: nothing moved, don't rewrite settings.json
+        self.settings["pos"], self.settings["zoom"] = pos, zoom
         save_json(SETTINGS_FILE, self.settings)
 
     def minimize(self):
@@ -1267,7 +1244,7 @@ class App:
             self.render(self.last_frame)
             if int(now) % 5 == 0:
                 self.root.attributes("-topmost", True)  # re-assert: some full-screen apps push topmost windows down
-        if self.show_table and readings:
+        if self.show_table and readings and self.visible():
             self.fill_table(readings)
 
     @staticmethod
@@ -2334,6 +2311,14 @@ def selftest():
         return struct.pack("<69i", *d).ljust(es - 260, b"\0") + gid.encode().ljust(260, b"\0")
     m = entry("VEN_1002&DEV_164E", 0, 0, 0, 0) + entry("VEN_10DE&DEV_2C02", 0x400 | 0x800 | 0x1000, 75, -502000, 1000000)
     assert parse_oc(m, 2, es) == {"0": {"power": 75, "core": -502, "mem": 1000, "temp": None, "bus": None}}
+    def normalise(entries, gpus):  # what read_afterburner() does per entry: classify, then drop "no data" values
+        nv = nvidia_cards(gpus)
+        out = []
+        for name, unit, val, gpu in entries:
+            meta = classify(name, unit, gpu, nv)
+            if meta and usable(val):
+                out.append((meta[0], meta[1], val, meta[2]))
+        return out
     norm = normalise(raw, gpus)
     assert ("GPU [#0]: NVIDIA GeForce RTX 5080: Dell", "GPU Temperature", 38.0, "\xb0C") in norm
     assert ("GPU [#1]: NVIDIA GeForce RTX 5080: MSI", "GPU Power", 12.7, "W") in norm
