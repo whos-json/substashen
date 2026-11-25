@@ -10,10 +10,10 @@ $approved = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApp
 foreach ($f in $exe, (Join-Path $dir 'substashen.pyw')) { if (-not (Test-Path $f)) { throw "Not found: $f" } }
 
 Set-ItemProperty -Path $run -Name $name -Value "`"$exe`""
-# If it was switched off in Settings before, switch it back on.
-if (Get-ItemProperty -Path $approved -Name $name -ErrorAction SilentlyContinue) {
-    Remove-ItemProperty -Path $approved -Name $name
-}
+# Mark it enabled (02 = on), the record Settings writes when you switch an app on; re-enables it if it was off.
+# Run this from Explorer (double-click the .bat): a sandboxed or virtualized shell may write to a private copy of the
+# registry that Windows never reads at sign-in.
+New-ItemProperty -Path $approved -Name $name -PropertyType Binary -Value ([byte[]](2,0,0,0,0,0,0,0,0,0,0,0)) -Force | Out-Null
 # An earlier version used a scheduled task instead; remove it so Substashen isn't started twice.
 if (Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $name -TaskPath '\' -Confirm:$false
